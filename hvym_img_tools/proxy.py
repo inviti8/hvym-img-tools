@@ -21,6 +21,7 @@ The proxy does no GPU work, so it can run on the cheapest always-on box availabl
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -37,10 +38,19 @@ from .core.server import configure_logging
 
 log = logging.getLogger(__name__)
 
-#: RunPod's synchronous endpoint. Cold start can take tens of seconds, so the
-#: client-side timeout is generous; warm requests return in ~2s.
+#: RunPod's synchronous endpoint. Cold start can take *minutes* -- the worker has
+#: to pull a ~6.5GB image before it loads a single model -- so the budget below is
+#: whole-operation wall clock, not per-HTTP-call. Warm requests return in ~2s.
 RUNPOD_BASE = "https://api.runpod.ai/v2"
-DEFAULT_TIMEOUT = float(os.environ.get("HVYM_PROXY_TIMEOUT", "180"))
+DEFAULT_TIMEOUT = float(os.environ.get("HVYM_PROXY_TIMEOUT", "600"))
+
+#: /runsync does not block indefinitely: RunPod caps it server-side (~90s) and
+#: then hands back the job still IN_QUEUE rather than the result. That is not an
+#: error and not an edge case -- a scale-from-zero cold start exceeds the cap
+#: every time -- so a queued job is polled to completion via /status/{id}.
+TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"})
+POLL_INITIAL = 1.0
+POLL_MAX = 5.0
 
 
 def _auth_dependency(auth: ApiKeyAuth):
@@ -112,25 +122,48 @@ def create_app() -> FastAPI:
                 payload[key] = value
 
         started = time.perf_counter()
+        auth_header = {"Authorization": f"Bearer {runpod_key}"}
+
+        def _check(resp: httpx.Response) -> dict:
+            if resp.status_code >= 400:
+                log.error("runpod returned %s", resp.status_code)
+                raise HTTPException(status_code=502, detail=f"upstream status {resp.status_code}")
+            return resp.json()
+
         try:
+            # One client for the whole job so polling reuses the connection.
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-                resp = await client.post(
+                body = _check(await client.post(
                     f"{RUNPOD_BASE}/{endpoint_id}/runsync",
-                    headers={"Authorization": f"Bearer {runpod_key}"},
+                    headers=auth_header,
                     json={"input": payload},
-                )
+                ))
+
+                status = body.get("status")
+                job_id = body.get("id")
+                delay = POLL_INITIAL
+                while status not in TERMINAL_STATUSES and status is not None and job_id:
+                    if time.perf_counter() - started > DEFAULT_TIMEOUT:
+                        raise HTTPException(
+                            status_code=504,
+                            detail=f"job {status} after {DEFAULT_TIMEOUT:.0f}s",
+                        )
+                    if delay == POLL_INITIAL:
+                        log.info("tool=%s job queued upstream, polling for result", name)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.5, POLL_MAX)
+                    body = _check(await client.get(
+                        f"{RUNPOD_BASE}/{endpoint_id}/status/{job_id}", headers=auth_header
+                    ))
+                    status = body.get("status")
+        except HTTPException:
+            raise
         except httpx.TimeoutException as exc:
             raise HTTPException(status_code=504, detail="upstream timed out") from exc
         except httpx.HTTPError as exc:
             # Deliberately does not echo the upstream URL or key material.
             raise HTTPException(status_code=502, detail=f"upstream error: {type(exc).__name__}") from exc
 
-        if resp.status_code >= 400:
-            log.error("runpod returned %s", resp.status_code)
-            raise HTTPException(status_code=502, detail=f"upstream status {resp.status_code}")
-
-        body = resp.json()
-        status = body.get("status")
         if status not in (None, "COMPLETED"):
             detail = body.get("error") or f"job status {status}"
             raise HTTPException(status_code=502, detail=str(detail)[:500])

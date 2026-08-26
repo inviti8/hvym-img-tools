@@ -45,8 +45,12 @@ class FakeUpstream:
         self.status = status
         self.seen: dict = {}
 
-    def install(self, monkeypatch, raises=None):
+    def install(self, monkeypatch, raises=None, queued_polls=0):
+        """queued_polls>0 makes /runsync answer IN_QUEUE, as RunPod really does
+        once a job outlives its ~90s server-side cap, and hand the result over
+        only after that many /status polls."""
         upstream = self
+        upstream.polls = 0
 
         class _Client:
             def __init__(self, *a, **kw):
@@ -62,11 +66,21 @@ class FakeUpstream:
                 if raises is not None:
                     raise raises
                 upstream.seen = {"url": url, "headers": headers or {}, "json": json or {}}
-                return httpx.Response(
-                    upstream.status,
-                    json=upstream.payload,
-                    request=httpx.Request("POST", url),
-                )
+                body = upstream.payload
+                if queued_polls:
+                    body = {"id": "job-abc", "status": "IN_QUEUE"}
+                return httpx.Response(upstream.status, json=body,
+                                      request=httpx.Request("POST", url))
+
+            async def get(self, url, headers=None):
+                upstream.polls += 1
+                upstream.polled_url = url
+                if upstream.polls < queued_polls:
+                    body = {"id": "job-abc", "status": "IN_PROGRESS"}
+                else:
+                    body = dict(upstream.payload, id="job-abc")
+                return httpx.Response(200, json=body,
+                                      request=httpx.Request("GET", url))
 
         monkeypatch.setattr(proxy_mod.httpx, "AsyncClient", _Client)
         return upstream
@@ -198,3 +212,55 @@ def test_unconfigured_proxy_is_503(monkeypatch):
         headers={"X-API-Key": GOOD},
     )
     assert resp.status_code == 503
+
+
+# --- queued jobs -----------------------------------------------------------
+# A scale-from-zero cold start ALWAYS outlives RunPod's ~90s /runsync cap: the
+# worker pulls a ~6.5GB image before it loads a model. runsync then returns the
+# job still IN_QUEUE, which the proxy used to report as a 502 -- so the very
+# first request after every scale-to-zero failed. Live deploy caught this; the
+# mocked upstream above never produced it.
+
+@pytest.fixture(autouse=True)
+def _no_poll_sleep(monkeypatch):
+    """Poll backoff is real seconds; tests should not pay it."""
+    async def _instant(_):
+        return None
+    monkeypatch.setattr(proxy_mod.asyncio, "sleep", _instant)
+
+
+def test_queued_job_is_polled_to_completion(env, monkeypatch):
+    up = FakeUpstream().install(monkeypatch, queued_polls=3)
+    resp = _client().post(
+        "/tools/reangle",
+        files={"image": ("a.png", b"x", "image/png")},
+        headers={"X-API-Key": GOOD},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.content == GLB
+    assert up.polls == 3
+    assert up.polled_url.endswith("/ep123/status/job-abc")
+
+
+def test_polling_gives_up_and_reports_504(env, monkeypatch):
+    monkeypatch.setattr(proxy_mod, "DEFAULT_TIMEOUT", -1.0)  # budget already spent
+    FakeUpstream().install(monkeypatch, queued_polls=99)
+    resp = _client().post(
+        "/tools/reangle",
+        files={"image": ("a.png", b"x", "image/png")},
+        headers={"X-API-Key": GOOD},
+    )
+    assert resp.status_code == 504
+    assert "IN_QUEUE" in resp.json()["detail"]
+
+
+def test_job_that_fails_while_queued_becomes_502(env, monkeypatch):
+    FakeUpstream(payload={"status": "FAILED", "error": "worker died"}).install(
+        monkeypatch, queued_polls=1)
+    resp = _client().post(
+        "/tools/reangle",
+        files={"image": ("a.png", b"x", "image/png")},
+        headers={"X-API-Key": GOOD},
+    )
+    assert resp.status_code == 502
+    assert "worker died" in resp.json()["detail"]
