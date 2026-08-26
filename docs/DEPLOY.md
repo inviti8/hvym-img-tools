@@ -1,0 +1,144 @@
+# DEPLOY.md — serverless GPU + authenticating proxy
+
+The shipped shape (**option C**): RunPod Serverless does the GPU work and scales to
+zero; a small always-on proxy holds the RunPod key and authenticates Inkternity.
+
+```
+  Inkternity                proxy (no GPU)              RunPod Serverless
+  ──────────                ──────────────              ─────────────────
+  POST /tools/reangle  ──▶  X-API-Key check       ──▶   worker pulls job
+  X-API-Key: <scoped>       base64 the image            matte → TripoSR →
+                            RUNPOD_API_KEY stays        UV bake → .glb
+  ◀── char.glb ─────────    server-side           ◀──   base64 out
+                                                        scale-to-zero when idle
+```
+
+## Why the proxy is not optional
+
+Calling RunPod Serverless directly means embedding a **RunPod API key** in the
+desktop app. A RunPod *account* key can create pods, spend the balance and delete
+resources — so a leaked one costs far more than a leaked scoped key, which can
+only ask for a mesh. The proxy is what keeps that key off client machines.
+
+It also **mirrors the direct server's HTTP contract exactly** — same
+`POST /tools/{name}`, same multipart in, same binary out, same `X-Cache` and
+`X-Tool-Version` headers. Inkternity's client code is therefore identical whether
+it points at this proxy or at a persistent pod running `core.server`, so the
+deployment can change later without touching the client.
+
+Read [`AUTH.md`](AUTH.md) for the threat model — the scoped key is spend control
+and a revocation lever, not an identity boundary.
+
+## Images
+
+| Image | Role | Contents |
+|---|---|---|
+| `docker/Dockerfile` | GPU worker | torch, TripoSR, torchmcubes, **weights baked in** |
+| `docker/Dockerfile.proxy` | proxy | fastapi + httpx only — no torch, no CUDA |
+
+The GPU image is multi-stage: CUDA `devel` compiles `torchmcubes`, then the wheel
+is copied into a `python:3.11-slim` runtime, so **nvcc never ships**. torch's pip
+wheels bundle their own CUDA libs, so the runtime needs only the host driver.
+
+Weights (isnet ~176 MB, TripoSR ~1.7 GB) are **baked in**. Downloading them on a
+cold worker would add ~1.9 GB before the first job — exactly what FlashBoot exists
+to avoid.
+
+### Build-time assertions
+
+The build fails rather than shipping a subtly broken image if:
+
+- `onnxruntime-gpu` lacks `CUDAExecutionProvider` — `rembg` (a TripoSR import)
+  drags in **CPU onnxruntime**, which shadows the GPU build and silently makes the
+  matte **6.4 s instead of 0.03 s**, with no error
+- `torchmcubes` will not import
+- the isnet download is truncated
+- `reangle` fails to register
+- (proxy) anything makes it import `torch`
+
+## Build and push
+
+```sh
+docker build -f docker/Dockerfile       -t <registry>/hvym-img-tools:0.1.0 .
+docker build -f docker/Dockerfile.proxy -t <registry>/hvym-img-proxy:0.1.0 .
+docker push <registry>/hvym-img-tools:0.1.0
+docker push <registry>/hvym-img-proxy:0.1.0
+```
+
+The GPU image builds for compute **8.6 and 8.9** (`TORCH_CUDA_ARCH_LIST`), covering
+A40/A6000/A5000/3090 and 4090/L4/L40S — the serverless tiers we might land on.
+
+## RunPod Serverless endpoint
+
+Create it against the GPU image with:
+
+| Setting | Value | Why |
+|---|---|---|
+| Container image | `<registry>/hvym-img-tools:0.1.0` | |
+| Container start command | *(default)* → `serverless` | entrypoint's default mode |
+| GPU tier | 24 GB | peak VRAM measured at **4.44 GB** — no need to pay for 48 GB |
+| Max workers | start at 1–2 | one request per drawing; scale later |
+| Idle timeout | 5–10 s | scale-to-zero is the whole point |
+| FlashBoot | on | mitigates cold start |
+| `HVYM_CACHE_DIR` | a network volume | otherwise the cache dies with the worker |
+
+**The result cache is per-worker unless you mount shared storage.** Cache keys are
+`sha256(image + params)`, so a network volume lets a second worker serve a drawing
+the first one already built. Without it, every cold worker starts cold-cached and
+the "instant re-request" property is lost.
+
+## Running the proxy
+
+```sh
+docker run -d --restart=unless-stopped -p 8080:8080 \
+  -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)" \
+  -e RUNPOD_API_KEY=...      `# never leaves the server` \
+  -e RUNPOD_ENDPOINT_ID=...  \
+  <registry>/hvym-img-proxy:0.1.0
+```
+
+Then Inkternity talks only to the proxy:
+
+```sh
+curl -X POST https://proxy.example.com/tools/reangle \
+     -H "X-API-Key: $SCOPED_KEY" \
+     -F image=@drawing.png -F mc_resolution=256 -o char.glb
+```
+
+**Put TLS in front of the proxy.** Over plain HTTP the scoped key is cleartext on
+the wire.
+
+## Cold start
+
+Measured model load is **~13.7 s** (isnet 0.6 s + TripoSR 15.1 s observed under
+load). Container start on top of that is **not measured here** — it depends on
+FlashBoot and image-pull caching, and could not be measured from a pod
+(BENCHMARK.md §6). Confirm it against the real endpoint and record it.
+
+Mitigations, in order of cost: FlashBoot (free), weights baked in (done),
+`HVYM_PROXY_TIMEOUT` generous enough to ride out a cold start (default 180 s), and
+one always-warm worker if a demo cannot tolerate the first-call latency — that last
+one costs the per-second rate continuously and gives up scale-to-zero.
+
+## Other modes of the same image
+
+The entrypoint picks a role at run time, so one artifact covers every deployment:
+
+```sh
+docker run --gpus all -p 8000:8000 -e HVYM_API_KEY=... IMAGE serve   # persistent pod
+docker run --gpus all IMAGE cli reangle --in a.png --out a.glb       # one-off
+docker run --gpus all -it IMAGE bash                                  # debug
+```
+
+`serve` is option B from the design discussion: no proxy needed since the scoped
+key is checked directly, but it bills continuously (~$250–540/mo) instead of
+~$0.55/mo at 1,000 drawings.
+
+## Operational checks
+
+- `GET /healthz` on the proxy — open, reports `runpod_configured`, never echoes keys
+- Worker logs show `warmed models: {...}` at startup; if a request instead pays the
+  ~15 s load, warm-up is broken
+- Worker logs show `front view: ... IoU=0.77` per request; a sharp drop means the
+  mesh no longer matches the artist's silhouette
+- `X-Cache: HIT` should dominate in normal use — one call per drawing

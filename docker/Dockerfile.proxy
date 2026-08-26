@@ -1,0 +1,41 @@
+# The authenticating proxy (docs/AUTH.md, docs/DEPLOY.md).
+#
+# Deliberately a separate, tiny image: the proxy does **no GPU work**, so it must
+# not carry torch, CUDA or 1.9 GB of baked weights. It is the only always-on
+# component, so its cost is the standing cost of the whole deployment -- keep it
+# small enough to run on the cheapest box available.
+#
+# It exists so the RunPod API key never ships to a client: an account key grants
+# full account access, whereas the scoped key this proxy checks can only ask for
+# a mesh.
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
+    HVYM_PORT=8080
+
+RUN pip install --upgrade pip \
+    && pip install fastapi "uvicorn[standard]" python-multipart pydantic httpx
+
+WORKDIR /app
+# Only what the proxy imports: it pulls core.auth / core.config / core.server's
+# configure_logging, none of which touch torch (core is CPU-importable by design).
+COPY hvym_img_tools /app/hvym_img_tools
+
+# Fail the build, not the deploy, if the proxy stops being importable without a
+# GPU stack present.
+RUN python -c "\
+import sys; \
+from hvym_img_tools.proxy import create_app; \
+assert 'torch' not in sys.modules, 'proxy must not import torch'; \
+print('ok: proxy imports without torch')"
+
+EXPOSE 8080
+CMD ["python", "-m", "hvym_img_tools.proxy"]
+
+# Placed last so it never invalidates the expensive layers above. The source
+# label links the GHCR package to the repo, which is also what lets the package
+# inherit/settle its visibility.
+LABEL org.opencontainers.image.source="https://github.com/inviti8/hvym-img-tools"       org.opencontainers.image.description="Authenticating proxy for hvym-img-tools serverless"       org.opencontainers.image.licenses="MIT"

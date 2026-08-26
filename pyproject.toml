@@ -33,6 +33,7 @@ dev = [
 [project.scripts]
 hvym-img = "hvym_img_tools.cli:main"
 hvym-img-serve = "hvym_img_tools.core.server:main"
+hvym-img-proxy = "hvym_img_tools.proxy:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,22 @@
+# Keep the build context small -- .venv alone is >1GB and would be uploaded
+# to the daemon on every build.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.git/
+.github/
+docs/
+scripts/
+tests/
+uv.lock
+.env
+.env.*
+*.glb
+*.obj
+*.onnx
+out/
+outputs/
