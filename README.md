@@ -67,6 +67,7 @@ identical either way. See [`docs/DEPLOY.md`](docs/DEPLOY.md) and
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | **start here** — onboarding, the `Tool` contract, how to add a tool |
 | [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | measured latency, cost model, the GREEN decision, and the gotchas |
+| [`docs/CLIENT.md`](docs/CLIENT.md) | **integrating a client** — request/response, status codes, timeouts |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | images, serverless endpoint, proxy, cold start |
 | [`docs/WARMING.md`](docs/WARMING.md) | the demo warm switch vs. the product's client lease, and what warm costs |
 | [`docs/AUTH.md`](docs/AUTH.md) | API-key scheme, threat model, upgrade path |

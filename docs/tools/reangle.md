@@ -28,6 +28,9 @@ Returns `model/gltf-binary` (`char.glb`). Responses carry `X-Cache: HIT|MISS` an
 drawing is instant — which is the whole access pattern: **one call per drawing**, then all
 interaction is local in Inkternity.
 
+Integrating a client? [CLIENT.md](../CLIENT.md) is the full contract — status
+codes, retry semantics, and the ≥300 s timeout a cold start requires.
+
 ```sh
 curl -X POST http://localhost:8000/tools/reangle \
      -F image=@drawing.png -F mc_resolution=256 -o char.glb
