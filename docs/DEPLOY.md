@@ -100,12 +100,82 @@ the "instant re-request" property is lost.
 ## Running the proxy
 
 ```sh
-docker run -d --restart=unless-stopped -p 8080:8080 \
-  -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)" \
-  -e RUNPOD_API_KEY=...      `# never leaves the server` \
-  -e RUNPOD_ENDPOINT_ID=...  \
-  <registry>/hvym-img-proxy:0.1.0
+docker run -d --restart=unless-stopped -p 127.0.0.1:8080:8080   --memory=512m --memory-reservation=256m --cpus=0.5   -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)"   -e RUNPOD_API_KEY=...      `# never leaves the server`   -e RUNPOD_ENDPOINT_ID=...    -e HVYM_MAX_UPLOAD_MB=8 -e HVYM_PROXY_TIMEOUT=600   ghcr.io/inviti8/hvym-img-proxy:0.1.0
 ```
+
+### Measured footprint
+
+`ghcr.io/inviti8/hvym-img-proxy:0.1.0`, real image, real uploads:
+
+| State | Memory | CPU |
+|---|---|---|
+| Idle | **38-42 MiB** | 0.3 % |
+| One real drawing (556 KB) | 44 MiB peak | - |
+| **Six concurrent real drawings** | **74 MiB** | 1.8 % |
+| One 8 MB upload | 104 MiB peak | - |
+| One 30 MB upload (near the 32 MB default cap) | **280 MiB peak** | - |
+
+**Peak scales at roughly 8x the upload size.** The proxy buffers the whole file,
+base64-encodes it (1.33x), and the JSON serialisation and httpx both take copies.
+That multiplier - not idle usage - is what sizing must survive.
+
+RSS is *sticky* after a large upload (it sat at ~165 MiB before settling back to
+~74 MiB), so budget against the high-water mark rather than the idle figure.
+
+**`HVYM_MAX_UPLOAD_MB` is the load-bearing knob.** It defaults to 32, which
+allows a 280 MiB spike per concurrent request. Character drawings are ~556 KB,
+so **8 gives ~14x headroom and caps the spike near 105 MiB**. Lower it before
+worrying about anything else.
+
+## Co-hosting on a shared VPS
+
+A 2 vCPU / 4 GiB box already running another service has ample room: expect
+**~75 MiB steady** and well under 1 % of one core. The proxy is I/O-bound - it
+spends nearly all its time awaiting RunPod, not computing.
+
+Check what the neighbour actually leaves free first:
+
+```sh
+free -m; docker stats --no-stream
+```
+
+Give it a hard ceiling so it can never starve the neighbour. With `--memory=512m`
+a runaway proxy is OOM-killed and restarted by `--restart=unless-stopped`, which
+is the correct failure mode on a shared box - the other service keeps running.
+
+Bind to `127.0.0.1:8080` (as above) so only the local reverse proxy can reach it.
+
+### Reverse-proxy settings that will otherwise break it
+
+If the box already terminates TLS for the other project, reuse that proxy rather
+than adding a second. Two defaults will break this service:
+
+- **`client_max_body_size` defaults to 1 MB in nginx** - every upload fails with
+  413. Set it to match `HVYM_MAX_UPLOAD_MB`.
+- **`proxy_read_timeout` defaults to 60 s in nginx** - this kills *every cold
+  start*, which runs up to ~260 s (BENCHMARK.md 6b). Set 300 s or more.
+
+```nginx
+location /tools/ {
+    proxy_pass http://127.0.0.1:8080;
+    client_max_body_size 8m;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+```caddy
+img.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        transport http { read_timeout 300s }
+    }
+    request_body { max_size 8MB }
+}
+```
+
+Caddy gets a certificate automatically; with nginx use certbot. **TLS is not
+optional** - over plain HTTP the scoped key is cleartext on the wire.
+
 
 Then Inkternity talks only to the proxy:
 
