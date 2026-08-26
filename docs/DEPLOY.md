@@ -37,7 +37,7 @@ and a revocation lever, not an identity boundary.
 | `docker/Dockerfile.proxy` | proxy | fastapi + httpx only — no torch, no CUDA |
 
 The GPU image is multi-stage: CUDA `devel` compiles `torchmcubes`, then the wheel
-is copied into a `python:3.11-slim` runtime, so **nvcc never ships**. torch's pip
+is copied into a `python:3.10-slim` runtime, so **nvcc never ships**. torch's pip
 wheels bundle their own CUDA libs, so the runtime needs only the host driver.
 
 Weights (isnet ~176 MB, TripoSR ~1.7 GB) are **baked in**. Downloading them on a
@@ -58,11 +58,21 @@ The build fails rather than shipping a subtly broken image if:
 
 ## Build and push
 
+**Build in CI, not on a workstation.** The GPU image is ~7-8 GB and pulls ~5 GB
+of torch/CUDA wheels; a runner sits on the same network as GHCR, so the push is
+effectively free, whereas a local build moves that volume twice over whatever
+uplink the developer has.
+
 ```sh
-docker build -f docker/Dockerfile       -t <registry>/hvym-img-tools:0.1.0 .
-docker build -f docker/Dockerfile.proxy -t <registry>/hvym-img-proxy:0.1.0 .
-docker push <registry>/hvym-img-tools:0.1.0
-docker push <registry>/hvym-img-proxy:0.1.0
+gh workflow run images.yml -f tag=0.1.0        # .github/workflows/images.yml
+gh run watch $(gh run list --workflow=images.yml --limit 1 --json databaseId -q '.[0].databaseId')
+```
+
+Locally, if you need to reproduce a build failure:
+
+```sh
+docker build -f docker/Dockerfile       -t hvym-img-tools:0.1.0 .
+docker build -f docker/Dockerfile.proxy -t hvym-img-proxy:0.1.0 .
 ```
 
 The GPU image builds for compute **8.6 and 8.9** (`TORCH_CUDA_ARCH_LIST`), covering

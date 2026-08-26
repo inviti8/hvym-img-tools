@@ -64,20 +64,28 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--image", required=True, help="container image, e.g. ghcr.io/u/r:tag")
     ap.add_argument("--name", default="hvym-img-tools", help="template + endpoint name")
-    ap.add_argument("--gpu-types", default="NVIDIA GeForce RTX 4090,NVIDIA L4,NVIDIA RTX A5000",
-                    help="comma-separated; peak VRAM measured at 4.44GB so 24GB is plenty")
+    ap.add_argument("--gpu-types", default="NVIDIA GeForce RTX 4090,NVIDIA L4",
+                    help="comma-separated; peak VRAM measured at 4.44GB so 24GB is plenty. "
+                         "Must be available in --data-center-ids, or workers never schedule.")
+    ap.add_argument("--data-center-ids", default="EU-RO-1",
+                    help="a network volume exists in exactly one data center, so the "
+                         "endpoint must be pinned to the same one")
     ap.add_argument("--workers-min", type=int, default=0, help="0 = scale to zero")
     ap.add_argument("--workers-max", type=int, default=2)
     ap.add_argument("--idle-timeout", type=int, default=10, help="seconds before a worker sleeps")
     ap.add_argument("--execution-timeout-ms", type=int, default=600_000)
-    ap.add_argument("--container-disk-gb", type=int, default=20)
+    ap.add_argument("--container-disk-gb", type=int, default=30,
+                    help="must hold the ~7-8GB image plus its writable layer; a disk "
+                         "too small for the image stalls silently rather than erroring")
     ap.add_argument("--no-flashboot", action="store_true")
     ap.add_argument("--registry-user", default=os.environ.get("GHCR_USER", ""))
     ap.add_argument("--registry-token", default=os.environ.get("GHCR_TOKEN", ""),
                     help="use a read:packages-only token; omit if the image is public")
-    ap.add_argument("--network-volume-id", default="",
+    ap.add_argument("--network-volume-id", default=os.environ.get("RUNPOD_NETWORK_VOLUME_ID", ""),
                     help="strongly recommended: without shared storage the result "
                          "cache dies with each worker")
+    ap.add_argument("--volume-mount-path", default="/runpod-volume",
+                    help="where RunPod mounts the network volume on a serverless worker")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -103,16 +111,23 @@ def main() -> int:
             print(f"registry auth: created {registry_auth_id}")
 
     # 2. template
+    env = {
+        # Weights are baked into the image; these point at them.
+        "HVYM_WARM_ON_STARTUP": "1",
+        "HVYM_LOG_LEVEL": "INFO",
+    }
+    if args.network_volume_id:
+        # The image defaults HVYM_CACHE_DIR to /cache, which lives in the
+        # container's own writable layer and dies with the worker. Attaching a
+        # volume without repointing the cache at it buys nothing.
+        env["HVYM_CACHE_DIR"] = f"{args.volume_mount_path.rstrip('/')}/cache"
+
     template_body = {
         "name": args.name,
         "imageName": args.image,
         "isServerless": True,
         "containerDiskInGb": args.container_disk_gb,
-        "env": {
-            # Weights are baked into the image; these point at them.
-            "HVYM_WARM_ON_STARTUP": "1",
-            "HVYM_LOG_LEVEL": "INFO",
-        },
+        "env": env,
     }
     if registry_auth_id:
         template_body["containerRegistryAuthId"] = registry_auth_id
@@ -144,8 +159,12 @@ def main() -> int:
         "executionTimeoutMs": args.execution_timeout_ms,
         "flashboot": not args.no_flashboot,
     }
+    if args.data_center_ids:
+        endpoint_body["dataCenterIds"] = [d.strip() for d in args.data_center_ids.split(",") if d.strip()]
     if args.network_volume_id:
         endpoint_body["networkVolumeId"] = args.network_volume_id
+        print(f"cache -> {env['HVYM_CACHE_DIR']} on volume {args.network_volume_id} "
+              f"({args.data_center_ids})")
     else:
         print("WARNING: no --network-volume-id. The result cache is per-worker, so a "
               "cold worker starts cold-cached and re-requests are not free.")
