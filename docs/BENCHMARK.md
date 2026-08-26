@@ -265,9 +265,8 @@ Stated plainly so nobody reads more into the GREEN than it earns:
   **TripoSR was not tested against that hard case.** It may fail identically (the pose rule
   would then simply carry over) or do better. Worth one run before §4.1 is restated as a
   TripoSR-era feature rule.
-- **Serverless container cold-start** (FlashBoot, weights baked into the image) — not
-  measurable from a pod. The 13.70 s here is *model load only*, excluding container start.
-  Confirm during roadmap step 3.
+- ~~**Serverless container cold-start**~~ — **now measured against the live endpoint**;
+  see §6b. The 13.70 s here remains *model load only*, excluding container start.
 - **Lower `mc_resolution` quality.** The 2.7× saving at mc=128 is measured; whether the
   coarser mesh degrades the *depth proxy* is not. Cheap to check with `depthcheck.py`'s
   relief metrics.
@@ -275,6 +274,53 @@ Stated plainly so nobody reads more into the GREEN than it earns:
   disocclusion inpainting path (§9) will cost more.
 - **End-to-end reangle quality** — no depth-warp/orbit-bake was run against the prototype's
   output for side-by-side comparison.
+
+---
+
+## 6b. Measured on the live serverless endpoint
+
+Endpoint `69j3vhp0el0wv0` (RTX 4090 / L4, EU-RO-1, `workersMin=0`, `idleTimeout=10 s`,
+FlashBoot on), reached through the authenticating proxy with a real scoped key.
+Input: `alice_char2.png`, 556 KB.
+
+| Request | `X-Cache` | Upstream | Wall |
+|---|---|---|---|
+| Cold start — fresh worker, must pull the 6.48 GB image | HIT | 0.027 s | **260.5 s** |
+| Cold start — host already had the image cached | HIT | 0.014 s | 47.6 s |
+| Warm, genuine cache miss (`mc=192`) | MISS | **1.994 s** | 6.9 s |
+| Warm, cache hit | HIT | 0.008–0.027 s | 4.5–4.8 s |
+
+**The 1.994 s miss confirms the §2 projection** (1.918 s predicted steady state) on
+real serverless hardware rather than a rented pod.
+
+**Cold start is ~4.4 minutes, not seconds.** This is the number §6 flagged as
+unmeasured, and it is worse than the model-load figure suggests: nearly all of it
+is pulling 6.48 GB of image, of which a single torch+CUDA layer is 3.96 GB. When
+the host already holds the image it drops to ~48 s. FlashBoot does not help the
+first pull onto a given host.
+
+**The wall-clock column is not the deployment's latency.** These were measured
+with the proxy on a laptop, so every request paid that laptop's uplink for
+745 KB of base64 up and ~590 KB down — about 340 KB/s here, which is the whole
+~4.6 s floor on cache hits (RunPod's own API RTT measures ~0.7 s). A proxy on a
+VPS near the endpoint removes it; the client then pays only client→proxy.
+
+**The network volume works.** `hvym-img-cache` (10 GB, EU-RO-1) is mounted at
+`/runpod-volume` with `HVYM_CACHE_DIR=/runpod-volume/cache`. After the endpoint
+scaled to zero and a *fresh* worker started, the same cache key still returned
+`X-Cache: HIT` — a per-worker cache would have missed. Cost is $0.07/GB/mo, so
+**$0.70/mo**, which now exceeds the compute ($0.55/mo at 1,000 drawings); total
+~$1.25/mo.
+
+### The bug this found
+
+`/runsync` does not block until a job finishes — RunPod caps it at ~90 s and
+returns the job still `IN_QUEUE`. The proxy treated any non-`COMPLETED` status as
+failure, so **the first request after every scale-to-zero returned 502**, and
+scale-to-zero is the entire cost model. The work had actually completed on the
+worker; only the proxy's reading of the reply was wrong. Fixed by polling
+`/status/{id}`. The mocked upstream could not have caught it — it always answered
+`COMPLETED` on the first call.
 
 ---
 

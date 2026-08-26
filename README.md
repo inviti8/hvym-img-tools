@@ -17,8 +17,9 @@ The cost-model gate is settled and the framework is built.
 | | |
 |---|---|
 | **Reconstruction** | **0.114 s** (TripoSR) vs ~8–10 min for the prototype — ~340× end to end |
-| **Request, warm** | **~1.7 s** through the real API; **0.014 s** on a cache hit |
-| **Cost** | **$0.00054/image** serverless → ~**$0.55/mo** at 1,000 drawings |
+| **Request, warm** | **1.99 s** on the live serverless endpoint; **0.02 s** on a cache hit |
+| **Cold start** | **~260 s** for a fresh worker to pull the 6.48 GB image (~48 s if the host has it) |
+| **Cost** | **$0.00054/image** → ~$0.55/mo compute + $0.70/mo cache volume at 1,000 drawings |
 | **Licensing** | **MIT end to end** — no CC-BY-NC anywhere |
 | **Verdict** | 🟢 **GREEN** — see [`docs/BENCHMARK.md`](docs/BENCHMARK.md) |
 
@@ -49,6 +50,10 @@ uv run hvym-img reangle --in drawing.png --out char.glb   # same, locally
 - **one GPU container** serves every tool; deploy to RunPod serverless or a persistent box.
 
 ## Deployment
+
+**Live:** endpoint `69j3vhp0el0wv0` (RTX 4090 / L4, EU-RO-1), images on
+[GHCR](https://github.com/inviti8?tab=packages), result cache on a shared network volume
+so it survives scale-to-zero.
 
 RunPod Serverless (scale-to-zero) behind a small **authenticating proxy** that keeps the
 RunPod key server-side — an account key grants full account access and must never ship in a

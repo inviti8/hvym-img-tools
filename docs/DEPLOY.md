@@ -120,15 +120,31 @@ the wire.
 
 ## Cold start
 
-Measured model load is **~13.7 s** (isnet 0.6 s + TripoSR 15.1 s observed under
-load). Container start on top of that is **not measured here** — it depends on
-FlashBoot and image-pull caching, and could not be measured from a pod
-(BENCHMARK.md §6). Confirm it against the real endpoint and record it.
+**Measured on the live endpoint: ~260 s (4.4 min) onto a host that does not yet
+have the image; ~48 s onto one that does.** Model load is only 13.7 s of that —
+the rest is pulling 6.48 GB, of which a single torch+CUDA layer is 3.96 GB.
+FlashBoot does not help the first pull onto a given host. See BENCHMARK.md §6b.
 
-Mitigations, in order of cost: FlashBoot (free), weights baked in (done),
-`HVYM_PROXY_TIMEOUT` generous enough to ride out a cold start (default 180 s), and
-one always-warm worker if a demo cannot tolerate the first-call latency — that last
-one costs the per-second rate continuously and gives up scale-to-zero.
+This is the sharpest edge of the deployment. A demo that opens with a 4-minute
+wait reads as broken, so pick a mitigation deliberately:
+
+| Mitigation | Cost | Effect |
+|---|---|---|
+| FlashBoot | free | already on; helps repeat starts, not the first pull |
+| Weights baked in | free | already done; saves ~1.9 GB *after* the pull |
+| `HVYM_PROXY_TIMEOUT=600` | free | rides it out instead of failing (default) |
+| Warm the endpoint before a demo | one request | turns the demo's first call warm |
+| Shrink the image | effort | the 3.96 GB torch layer is where the time goes |
+| `workersMin=1` | **~$24/mo** | removes it entirely, gives up scale-to-zero |
+
+`workersMin=1` costs roughly 40× the compute bill at 1,000 drawings/month, so it
+buys latency, not economy — reach for it only if a demo genuinely cannot tolerate
+the first call.
+
+**A queued job is not a failed one.** `/runsync` caps at ~90 s server-side and
+then returns the job still `IN_QUEUE`; the proxy polls `/status/{id}` from there.
+Any client written against RunPod directly must do the same, or every
+scale-from-zero request will look like a 502.
 
 ## Other modes of the same image
 
