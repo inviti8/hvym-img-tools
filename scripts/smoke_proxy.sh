@@ -16,6 +16,18 @@ KEY="${HVYM_TOOLS_KEY:-${HVYM_API_KEY:-}}"
 BASE="${BASE%/}"
 [ -n "$KEY" ] || { echo "set HVYM_TOOLS_KEY (or HVYM_API_KEY)" >&2; exit 2; }
 
+# A freshly-added DNS record can be live in public resolvers while the machine
+# running this test still has the old NXDOMAIN cached. HVYM_RESOLVE_IP pins the
+# address for curl only, so the deployment can be verified without waiting for a
+# local cache to expire.
+CURL_EXTRA=()
+if [ -n "${HVYM_RESOLVE_IP:-}" ]; then
+  host="${BASE#*://}"; host="${host%%/*}"; host="${host%%:*}"
+  CURL_EXTRA=(--resolve "${host}:443:${HVYM_RESOLVE_IP}" --resolve "${host}:80:${HVYM_RESOLVE_IP}")
+  echo "note: pinning ${host} -> ${HVYM_RESOLVE_IP} for curl (local DNS bypass)"
+fi
+curl() { command curl "${CURL_EXTRA[@]}" "$@"; }
+
 GRN=$(printf '\033[32m'); RED=$(printf '\033[31m'); YEL=$(printf '\033[33m'); OFF=$(printf '\033[0m')
 pass=0; fail=0; warned=0
 ok()   { printf '%s  PASS%s  %s\n' "$GRN" "$OFF" "$*"; pass=$((pass+1)); }
