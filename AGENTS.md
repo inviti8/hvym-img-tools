@@ -21,6 +21,60 @@ Everything a new agent needs to start contributing. **Read this first.**
 
 ---
 
+## 0. FIRST ORDER OF BUSINESS — benchmark the cost model (do this before building)
+
+**Do this spike before scaffolding anything.** The entire architecture (serverless,
+per-request, one-shot-per-drawing) rests on a single unproven number: **how long does one
+image take?** If it's minutes, serverless is a non-starter (bad UX *and* long GPU holds);
+if it's seconds, serverless is cheap and ideal. We have **not** measured it. Settle it
+first — everything downstream depends on the answer.
+
+**Why it's unproven:** the validated prototype used **DrawingSpinUp (Wonder3D + NeuS)** at
+**~8–10 min/image** (NeuS reconstruction dominates) — far too slow for an interactive,
+per-request service. The hypothesized fix is **TripoSR** (MIT, outputs a mesh directly,
+~seconds) — but it is **unbenchmarked here**. This spike proves or kills it.
+
+**Steps**
+1. Spin a RunPod GPU. **Pick a tier that also exists on RunPod Serverless** (e.g.
+   A5000/A6000/L40-class) so the timing transfers to the cost model.
+2. Get **TripoSR** running (`github.com/VAST-AI-Research/TripoSR`, MIT). Fresh, *light*
+   env — TripoSR does **not** need tiny-cuda-nn / NeuS / Wonder3D, so ignore most of
+   REANGLE_PIPELINE.md §5; it's mostly `torch` + `diffusers`/`transformers` + its repo.
+3. Feed it the matted **char2** (re-matte with `../infinipaint/scripts/reangle/prep_input.py`,
+   or reuse the artifact under `../infinipaint/scripts/image_out/drawingspinup_alice2/`).
+4. **Measure** (cold and warm):
+   - matte (isnet), reconstruction (**the key number**), UV-bake + glb export, **total
+     warm wall-clock/image**, and **cold-start** (container + model load).
+5. **Check quality** — TripoSR is real 3D, so its depth should give proper object relief
+   (unlike monocular depth, which failed). Verify on char2: rotate the mesh / run the
+   depth-warp (`../infinipaint/scripts/reangle/depthwarp.py`) and confirm it's ≈
+   DrawingSpinUp quality or better.
+6. **Compute the cost model:** per-image GPU-seconds × serverless $/sec (verify current
+   RunPod pricing) + cold-start; project monthly at expected volume.
+
+**Reference economics** (order-of-magnitude — *verify pricing, replace with measured*):
+
+| Backbone | Est. time/image | Serverless $/image | Verdict |
+|---|---|---|---|
+| DrawingSpinUp (prototype) | ~8–10 min | ~$0.12–0.25 | ✗ too slow + long GPU hold |
+| **TripoSR (target)** | ~seconds–30s | ~**$0.005–0.02** | ✓ if quality holds |
+
+*Serverless bills per-second only while running → **~$0 idle** (vs. a persistent pod at
+~$350–580/mo). Cold start ~5–30s; mitigate with weights baked into the image + RunPod
+FlashBoot, or 1 warm worker for demos. Call volume stays tiny: one request per drawing,
+mesh cached by input hash, then all interaction is local in Inkternity.*
+
+**Decision gate**
+- **GREEN** — TripoSR warm ≲ ~30s/image **and** mesh quality ≈ DrawingSpinUp → commit to
+  the serverless architecture and build `ReangleTool` on TripoSR (§5, §11).
+- **RED** — too slow or too rough → document it and fall back: warm worker / persistent
+  box, a fast-preview + async-refine two-stage, or another backbone (InstantMesh, etc.).
+
+**Deliverable:** commit a short **`docs/BENCHMARK.md`** with the measured numbers, the
+quality check, and the GREEN/RED decision. **Only then** scaffold core + the tool.
+
+---
+
 ## 1. Vision & scope
 
 Creative apps increasingly want AI *augmentation* that respects the artist — non-invasive,
@@ -249,12 +303,15 @@ CC-BY-NC as demo-only in its doc), CPU-importable module, typed I/O, cached heav
 
 ## 11. Roadmap
 
+0. **Benchmark the cost model (FIRST) — §0.** TripoSR single-image latency + quality +
+   serverless cost → `docs/BENCHMARK.md` + a GREEN/RED decision. Gates everything below.
 1. **Scaffold core** — `Tool` ABC, registry, server, ModelCache, cache, imageio.
-2. **Reangle tool** — port the prototype; add the **front-projection UV-bake → glb** and the
-   `POST /tools/reangle` endpoint; cache the mesh by input hash.
-3. **TripoSR backbone** — replace DrawingSpinUp/Wonder3D (MIT, faster, lighter image).
-4. **Dockerfile + deploy** — RunPod; smoke-test end to end.
-5. **Inkternity client** — HTTP client + armature-viewer textured render + bake
+2. **Reangle tool on TripoSR** — port the prototype onto the benchmarked backbone; add the
+   **front-projection UV-bake → glb** and the `POST /tools/reangle` endpoint; cache the mesh
+   by input hash.
+3. **Dockerfile + deploy** — the *light* TripoSR image; RunPod **serverless** (scale-to-zero,
+   weights baked in, FlashBoot); smoke-test end to end + confirm the cold-start number.
+4. **Inkternity client** — HTTP client + armature-viewer textured render + bake
    (REANGLE_PIPELINE.md §7).
-6. **Tool #2** — pick the next AI-augmented image capability and prove the framework
+5. **Tool #2** — pick the next AI-augmented image capability and prove the framework
    generalizes.
