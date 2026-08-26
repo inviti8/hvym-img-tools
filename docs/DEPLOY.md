@@ -133,13 +133,17 @@ wait reads as broken, so pick a mitigation deliberately:
 | FlashBoot | free | already on; helps repeat starts, not the first pull |
 | Weights baked in | free | already done; saves ~1.9 GB *after* the pull |
 | `HVYM_PROXY_TIMEOUT=600` | free | rides it out instead of failing (default) |
-| Warm the endpoint before a demo | one request | turns the demo's first call warm |
+| Warm the endpoint before a demo | ~$1.12/h while on | `scripts/warm.py on` — see [WARMING.md](WARMING.md) |
 | Shrink the image | effort | the 3.96 GB torch layer is where the time goes |
 | `workersMin=1` | **~$24/mo** | removes it entirely, gives up scale-to-zero |
 
 `workersMin=1` costs roughly 40× the compute bill at 1,000 drawings/month, so it
 buys latency, not economy — reach for it only if a demo genuinely cannot tolerate
-the first call.
+the first call. `scripts/warm.py` wraps exactly that as an operator switch.
+
+**Warming is designed differently for the demo than for the product**, because a
+switch a client holds fails expensively while one an operator holds does not.
+[WARMING.md](WARMING.md) covers both and why they diverge.
 
 **A queued job is not a failed one.** `/runsync` caps at ~90 s server-side and
 then returns the job still `IN_QUEUE`; the proxy polls `/status/{id}` from there.

@@ -33,3 +33,6 @@ Thumbs.db
 # benchmark evidence is reviewable output, not build artifacts
 !docs/benchmark/*.glb
 !docs/benchmark/*.png
+
+# operator warm-switch bookkeeping (scripts/warm.py)
+.warm_state.json
