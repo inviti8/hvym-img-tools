@@ -55,6 +55,9 @@ uv run hvym-img reangle --in drawing.png --out char.glb   # same, locally
 [GHCR](https://github.com/inviti8?tab=packages), result cache on a shared network volume
 so it survives scale-to-zero.
 
+Install the proxy on any Linux box with
+[`scripts/install_proxy.sh`](scripts/install_proxy.sh) (see [`docs/DEPLOY.md`](docs/DEPLOY.md)).
+
 RunPod Serverless (scale-to-zero) behind a small **authenticating proxy** that keeps the
 RunPod key server-side — an account key grants full account access and must never ship in a
 desktop client. The proxy mirrors the server's HTTP contract exactly, so client code is

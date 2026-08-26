@@ -97,6 +97,37 @@ Create it against the GPU image with:
 the first one already built. Without it, every cold worker starts cold-cached and
 the "instant re-request" property is lost.
 
+## Installing on a server
+
+One script, meant for a box that is already running something else:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inviti8/hvym-img-tools/main/scripts/install_proxy.sh -o install_proxy.sh
+less install_proxy.sh          # read it before running anything as root
+sudo bash install_proxy.sh
+```
+
+It prompts for the RunPod key (hidden), the endpoint ID, and generates the
+scoped client key. Re-running upgrades in place; `--status` and `--uninstall`
+do what they say.
+
+What it deliberately does **not** do is touch your web-server config. On a host
+with another live service, a bad edit plus a reload takes that service down, so
+the installer prints an nginx/Caddy snippet for you to paste instead. Re-print
+it any time with `--print-proxy-conf`.
+
+Other properties worth knowing:
+
+- Secrets are written to `/etc/hvym-img-tools/proxy.env` (0600) and passed with
+  `--env-file`, so they stay out of shell history and out of `ps`.
+- It binds `127.0.0.1` only — nothing is exposed until you front it with TLS.
+- It refuses to report success unless `/healthz` reports auth enabled **and** an
+  unauthenticated request actually gets a 401. A misconfigured open proxy fails
+  the install rather than quietly serving.
+- Docker is detected, never installed: adding a container runtime to a box
+  running production is a decision to make deliberately.
+
+
 ## Running the proxy
 
 ```sh
