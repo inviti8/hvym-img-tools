@@ -1,0 +1,108 @@
+# Build the container images on GitHub's network, not a workstation.
+#
+# The GPU image is ~7-8 GB and pulls ~5 GB of torch/CUDA wheels. Building it
+# locally and pushing to GHCR means moving that twice over a residential uplink;
+# a runner sits on the same network as the registry, so the push is effectively
+# free and a dropped Docker daemon can't take a multi-hour build with it.
+#
+# Manual by default: each run is slow and there is no reason to pay for it on
+# every commit. Tags publish a release build.
+name: images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "image tag (e.g. 0.1.0)"
+        required: true
+        default: "0.1.0"
+      push:
+        description: "push to GHCR"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  proxy:
+    # Small and fast (~270 MB), so it is a separate job -- no reason to make the
+    # proxy wait behind the GPU image.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: |
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.proxy
+          push: ${{ inputs.push != false }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-proxy:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-proxy:latest
+          cache-from: type=gha,scope=proxy
+          cache-to: type=gha,mode=max,scope=proxy
+
+  gpu:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # A default runner has ~21 GB free; the CUDA devel builder, two torch
+      # installs and 1.9 GB of baked weights do not fit. These four directories
+      # are the usual ~25 GB of preinstalled toolchains we never touch.
+      - name: Reclaim disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: |
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ inputs.push != false }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-tools:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-tools:latest
+          # No cache-to here: the layers are far larger than the 10 GB GHA cache
+          # budget, so writing them just evicts the proxy's cache for nothing.
+          cache-from: type=gha,scope=gpu
+
+      - name: Summary
+        run: |
+          echo "### images" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-tools:${{ steps.meta.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
