@@ -1,0 +1,35 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+uv.lock.bak
+
+# scratch / outputs
+out/
+outputs/
+*.glb
+*.obj
+*.ply
+weights/
+models/
+hf_cache/
+
+# os
+.DS_Store
+Thumbs.db
+
+# benchmark evidence is reviewable output, not build artifacts
+!docs/benchmark/*.glb
+!docs/benchmark/*.png

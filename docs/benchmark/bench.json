@@ -1,0 +1,68 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "mc_resolution": 256,
+  "chunk_size": 8192,
+  "torch": "2.8.0+cu128",
+  "cold": {
+    "isnet_load": 0.596,
+    "triposr_load": 13.101
+  },
+  "warm_runs": [
+    {
+      "matte_isnet": 0.825,
+      "reconstruct": 0.198,
+      "mesh_extract": 1.727,
+      "uvbake_glb_export": 0.033,
+      "total": 2.783,
+      "glb_bytes": 728652,
+      "mesh_verts": 14981,
+      "mesh_faces": 29887,
+      "vram_peak_gb": 4.44
+    },
+    {
+      "matte_isnet": 0.397,
+      "reconstruct": 0.124,
+      "mesh_extract": 1.463,
+      "uvbake_glb_export": 0.028,
+      "total": 2.012,
+      "glb_bytes": 728652,
+      "mesh_verts": 14981,
+      "mesh_faces": 29887,
+      "vram_peak_gb": 4.44
+    },
+    {
+      "matte_isnet": 0.373,
+      "reconstruct": 0.114,
+      "mesh_extract": 1.435,
+      "uvbake_glb_export": 0.028,
+      "total": 1.95,
+      "glb_bytes": 728652,
+      "mesh_verts": 14981,
+      "mesh_faces": 29887,
+      "vram_peak_gb": 4.44
+    },
+    {
+      "matte_isnet": 0.362,
+      "reconstruct": 0.114,
+      "mesh_extract": 1.386,
+      "uvbake_glb_export": 0.025,
+      "total": 1.887,
+      "glb_bytes": 728652,
+      "mesh_verts": 14981,
+      "mesh_faces": 29887,
+      "vram_peak_gb": 4.44
+    },
+    {
+      "matte_isnet": 0.348,
+      "reconstruct": 0.113,
+      "mesh_extract": 1.358,
+      "uvbake_glb_export": 0.026,
+      "total": 1.845,
+      "glb_bytes": 728652,
+      "mesh_verts": 14981,
+      "mesh_faces": 29887,
+      "vram_peak_gb": 4.44
+    }
+  ],
+  "depth_relief_range": 0.9210010766983032
+}
