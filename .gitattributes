@@ -1,0 +1,17 @@
+# Normalise to LF in the repo.
+* text=auto eol=lf
+
+# These MUST stay LF: a CRLF shebang fails on Linux with
+# "bad interpreter: /usr/bin/env bash^M" -- which breaks the Docker build.
+*.sh    text eol=lf
+*.py    text eol=lf
+Dockerfile text eol=lf
+*.toml  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+
+# Binary artifacts: never touch these.
+*.png   binary
+*.glb   binary
+*.obj   binary
+*.onnx  binary
