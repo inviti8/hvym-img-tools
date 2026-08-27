@@ -27,6 +27,7 @@ import binascii
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -35,6 +36,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from .core.auth import API_KEY_HEADER, ApiKeyAuth, extract_key
 from .core.config import Config
 from .core.server import configure_logging
+from .warm import WarmPool
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +90,20 @@ def create_app() -> FastAPI:
         log.error("RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID must both be set")
 
     guard = [Depends(_auth_dependency(auth))]
-    app = FastAPI(title="hvym-img-tools proxy", version="0.1.0")
+
+    # Warm leases (docs/WARMING.md). Built before the app so the keepalive loop
+    # can be torn down from a lifespan handler: if this process dies the pings
+    # stop and the worker sleeps on its own, which is the whole reason a lease
+    # beats a workersMin switch here.
+    pool = WarmPool(runpod_key, endpoint_id)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await pool.shutdown()
+
+    app = FastAPI(title="hvym-img-tools proxy", version="0.1.0", lifespan=lifespan)
+    app.state.warm_pool = pool
 
     @app.get("/healthz", tags=["meta"])
     def healthz() -> dict:
@@ -101,6 +116,47 @@ def create_app() -> FastAPI:
             "runpod_configured": bool(runpod_key and endpoint_id),
             "endpoint_id": endpoint_id or None,
         }
+
+    # ---------------------------------------------------------------- warming
+    # Gated by the same scoped key as /tools/{name}: a HVYM_API_KEY holder can
+    # ask for warmth and nothing else. The RunPod account key stays in this
+    # process (docs/AUTH.md, docs/WARMING.md).
+    async def _lease_id_from(request: Request) -> tuple[str | None, str]:
+        """Body is optional -- a first POST /warm legitimately has none."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - empty or non-JSON body is fine here
+            return None, ""
+        if not isinstance(body, dict):
+            return None, ""
+        lease_id = body.get("lease_id")
+        label = body.get("label") or body.get("client") or ""
+        return (str(lease_id) if lease_id else None), str(label)[:64]
+
+    @app.post("/warm", dependencies=guard, tags=["warm"])
+    async def warm_acquire(request: Request) -> dict:
+        if not runpod_key or not endpoint_id:
+            raise HTTPException(status_code=503, detail="proxy is not configured")
+        lease_id, label = await _lease_id_from(request)
+        return await pool.acquire(lease_id, label)
+
+    @app.get("/warm", tags=["warm"])
+    async def warm_status() -> dict:
+        # Unauthenticated on purpose: it is a read-only indicator that spends
+        # nothing, and the UI wants it before the artist has a lease. It reports
+        # no key, no endpoint URL, and cannot start a worker.
+        if not runpod_key or not endpoint_id:
+            raise HTTPException(status_code=503, detail="proxy is not configured")
+        return await pool.status()
+
+    @app.delete("/warm", dependencies=guard, tags=["warm"])
+    async def warm_release(request: Request) -> dict:
+        if not runpod_key or not endpoint_id:
+            raise HTTPException(status_code=503, detail="proxy is not configured")
+        lease_id, _ = await _lease_id_from(request)
+        if not lease_id:
+            raise HTTPException(status_code=422, detail="lease_id is required to release")
+        return await pool.release(lease_id)
 
     @app.post("/tools/{name}", dependencies=guard, response_class=Response)
     async def call_tool(name: str, request: Request) -> Response:

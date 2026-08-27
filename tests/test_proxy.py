@@ -223,10 +223,15 @@ def test_unconfigured_proxy_is_503(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_poll_sleep(monkeypatch):
-    """Poll backoff is real seconds; tests should not pay it."""
-    async def _instant(_):
-        return None
-    monkeypatch.setattr(proxy_mod.asyncio, "sleep", _instant)
+    """Poll backoff is real seconds; tests should not pay it.
+
+    Collapses the backoff constants rather than monkeypatching `asyncio.sleep`.
+    That call mutated the *real* asyncio module for every test in this file --
+    including the warm-lease tests below, whose keepalive loop would then spin
+    hot instead of sleeping between pings.
+    """
+    monkeypatch.setattr(proxy_mod, "POLL_INITIAL", 0.0)
+    monkeypatch.setattr(proxy_mod, "POLL_MAX", 0.0)
 
 
 def test_queued_job_is_polled_to_completion(env, monkeypatch):
@@ -264,3 +269,333 @@ def test_job_that_fails_while_queued_becomes_502(env, monkeypatch):
     )
     assert resp.status_code == 502
     assert "worker died" in resp.json()["detail"]
+
+
+# ===========================================================================
+# Warm leases (docs/WARMING.md "Product: a lease, held by the client")
+#
+# The property under test is not "warmth" but *release*: a client that crashes,
+# sleeps, or walks away must stop costing money without doing anything. Most of
+# what follows is really about the lease lapsing on its own.
+# ===========================================================================
+import asyncio  # noqa: E402
+
+from hvym_img_tools import warm as warm_mod  # noqa: E402
+
+
+class FakeRunPod:
+    """Counts keepalive jobs and serves worker counts, so tests assert on what
+    the pool actually sent rather than on wall-clock warmth."""
+
+    def __init__(self, ready: int = 0):
+        self.ready = ready
+        self.warm_jobs = 0
+        self.other_jobs = 0
+
+    def install(self, monkeypatch):
+        up = self
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, headers=None, json=None):
+                tool = ((json or {}).get("input") or {}).get("tool")
+                if tool == warm_mod.WARM_TOOL:
+                    up.warm_jobs += 1
+                else:
+                    up.other_jobs += 1
+                return httpx.Response(
+                    200,
+                    json={"status": "COMPLETED", "output": {"warm": True, "elapsed": 0.001}},
+                    request=httpx.Request("POST", url),
+                )
+
+            async def get(self, url, headers=None):
+                return httpx.Response(
+                    200,
+                    json={"workers": {"ready": up.ready, "initializing": 0}},
+                    request=httpx.Request("GET", url),
+                )
+
+        monkeypatch.setattr(warm_mod.httpx, "AsyncClient", _Client)
+        return up
+
+
+class Clock:
+    """Controllable monotonic source, so lease expiry is exact, not timed."""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def _pool(clock, **kw):
+    kw.setdefault("lease_ttl_s", 60.0)
+    kw.setdefault("ping_interval_s", 0.01)
+    return warm_mod.WarmPool("runpod-key", "ep123", clock=clock, **kw)
+
+
+# --- the wire contract between proxy and worker ----------------------------
+
+def test_warm_sentinel_matches_the_worker():
+    """The literal is duplicated so the worker needs no HTTP stack. If the two
+    ever drift, keepalives silently run the real pipeline instead."""
+    from hvym_img_tools.serverless import WARM_TOOL as worker_side
+
+    assert warm_mod.WARM_TOOL == worker_side
+
+
+def test_worker_short_circuits_a_warm_job():
+    from hvym_img_tools.serverless import handler
+
+    out = handler({"input": {"tool": warm_mod.WARM_TOOL}})
+    assert out["warm"] is True
+    assert "error" not in out
+    assert "data" not in out          # no pipeline ran
+
+
+# --- auth ------------------------------------------------------------------
+
+def test_warm_requires_the_scoped_key(env, monkeypatch):
+    FakeRunPod().install(monkeypatch)
+    client = _client()
+    assert client.post("/warm").status_code == 401
+    assert client.post("/warm", headers={"X-API-Key": "nope"}).status_code == 401
+    assert client.request("DELETE", "/warm", json={"lease_id": "x"}).status_code == 401
+
+
+def test_warm_status_is_open_for_the_indicator(env, monkeypatch):
+    FakeRunPod(ready=1).install(monkeypatch)
+    resp = _client().get("/warm")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "warm"
+
+
+def test_warm_never_leaks_the_runpod_key(env, monkeypatch):
+    FakeRunPod(ready=1).install(monkeypatch)
+    client = _client()
+    for body in (client.get("/warm").text,
+                 client.post("/warm", headers={"X-API-Key": GOOD}).text):
+        assert RUNPOD_KEY not in body
+        assert "api.runpod.ai" not in body
+
+
+def test_warm_acquire_over_http_returns_the_contract(env, monkeypatch):
+    FakeRunPod(ready=1).install(monkeypatch)
+    body = _client().post("/warm", headers={"X-API-Key": GOOD}).json()
+    for field in ("lease_id", "state", "ready", "elapsed_s",
+                  "expires_at", "lease_ttl_s", "renew_within_s"):
+        assert field in body, field
+    assert body["renew_within_s"] < body["lease_ttl_s"]
+
+
+def test_delete_without_a_lease_id_is_422(env, monkeypatch):
+    FakeRunPod().install(monkeypatch)
+    resp = _client().request("DELETE", "/warm", headers={"X-API-Key": GOOD}, json={})
+    assert resp.status_code == 422
+
+
+# --- lease lifecycle -------------------------------------------------------
+
+def test_acquire_extend_release(monkeypatch):
+    fake = FakeRunPod(ready=0).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        first = await pool.acquire()
+        assert first["state"] == "warming"      # lease held, worker not ready
+        assert first["ready"] is False
+        assert first["active_leases"] == 1
+        lease_id = first["lease_id"]
+
+        clock.advance(30)
+        again = await pool.acquire(lease_id)
+        assert again["lease_id"] == lease_id     # extended, not a second lease
+        assert again["active_leases"] == 1
+        assert pool._leases[lease_id].renewals == 1
+        assert again["elapsed_s"] == 30.0        # elapsed tracks the session
+
+        fake.ready = 1
+        clock.advance(warm_mod.HEALTH_CACHE_S + 1)   # GET /warm caches health
+        assert (await pool.status())["state"] == "warm"
+
+        released = await pool.release(lease_id)
+        assert released["active_leases"] == 0
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_two_clients_share_one_worker(monkeypatch):
+    """Refcounting: the second client must not double-pay, and the FIRST one
+    leaving must not cut warmth out from under the second."""
+    FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("inkternity-a", label="seat-a")
+        await pool.acquire("inkternity-b", label="seat-b")
+        assert (await pool.status())["active_leases"] == 2
+
+        await pool.release("inkternity-a")
+        assert (await pool.status())["active_leases"] == 1
+        assert pool.loop_running, "must stay warm while B still holds a lease"
+
+        await pool.release("inkternity-b")
+        assert (await pool.status())["active_leases"] == 0
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_release_is_idempotent(monkeypatch):
+    FakeRunPod().install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("only")
+        assert (await pool.release("only"))["active_leases"] == 0
+        # a retried DELETE after a dropped response must not error
+        assert (await pool.release("only"))["active_leases"] == 0
+        assert (await pool.release("never-existed"))["active_leases"] == 0
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_lease_expires_without_the_client_doing_anything(monkeypatch):
+    """The whole point: a crashed or sleeping client stops billing by itself."""
+    FakeRunPod().install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock, lease_ttl_s=60.0)
+        await pool.acquire("abandoned")
+        assert (await pool.status())["active_leases"] == 1
+
+        clock.advance(59)
+        assert (await pool.status())["active_leases"] == 1, "survives a missed renewal"
+
+        clock.advance(2)
+        status = await pool.status()
+        assert status["active_leases"] == 0
+        assert status["state"] == "cold"
+        assert status["expires_at"] is None
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+# --- the keepalive loop ----------------------------------------------------
+
+def test_keepalive_fires_warm_jobs_and_stops_when_the_lease_lapses(monkeypatch):
+    fake = FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock, ping_interval_s=0.01)
+        await pool.acquire("held")
+        assert pool.loop_running
+
+        await asyncio.sleep(0.08)
+        assert fake.warm_jobs >= 1, "a held lease must keep pinging the worker"
+        assert fake.other_jobs == 0, "keepalives must never run the real pipeline"
+
+        clock.advance(120)                     # lease lapses; client is gone
+        for _ in range(200):
+            if not pool.loop_running:
+                break
+            await asyncio.sleep(0.01)
+
+        assert not pool.loop_running, "loop must stop so the worker can sleep"
+        fired = fake.warm_jobs
+        await asyncio.sleep(0.05)
+        assert fake.warm_jobs == fired, "no pings after the lease lapsed"
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_tick_reports_idle_and_pings_only_while_leased(monkeypatch):
+    fake = FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("x")
+        await pool.shutdown()                  # drive ticks by hand
+
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 1
+
+        clock.advance(120)
+        assert await pool._tick() is False     # idle -> loop would exit
+        assert fake.warm_jobs == 1             # and it did not ping
+
+    asyncio.run(scenario())
+
+
+def test_ping_interval_keeps_margin_under_the_idle_timeout():
+    """idleTimeout is 10s, and the worker's idle clock restarts when a job
+    COMPLETES -- so the real gap is the sleep plus a RunPod round trip (~1s) plus
+    the health check. A cadence merely "under 10" is not enough; it needs slack."""
+    assert warm_mod.PING_INTERVAL_S <= 7, "leave room for round-trip latency"
+    assert warm_mod.RENEW_WITHIN_S < warm_mod.LEASE_TTL_S / 2, "tolerate a missed poll"
+
+
+# --- state is measured, never guessed --------------------------------------
+
+def test_state_comes_from_real_worker_readiness(monkeypatch):
+    fake = FakeRunPod(ready=0).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        assert (await pool.status())["state"] == "cold"
+
+        await pool.acquire("a")
+        status = await pool.status()
+        assert status["state"] == "warming"    # leased but not ready
+        assert status["ready"] is False
+
+        # Readiness is cached briefly so a UI poll does not re-ask RunPod every
+        # time; a real client polling every ~20s always sees past it.
+        fake.ready = 2
+        assert (await pool.status())["state"] == "warming", "cached within the window"
+        clock.advance(warm_mod.HEALTH_CACHE_S + 1)
+        status = await pool.status()
+        assert status["state"] == "warm"
+        assert status["workers_ready"] == 2
+        await pool.shutdown()
+
+    asyncio.run(scenario())
+
+
+# --- the direct-server no-op ----------------------------------------------
+
+def test_direct_server_warm_is_a_harmless_noop(monkeypatch):
+    """A persistent box is always warm, so the client ships one code path."""
+    monkeypatch.setenv("HVYM_DEVICE", "cpu")
+    from hvym_img_tools.core.server import create_app as server_app
+
+    client = TestClient(server_app())
+    body = client.get("/warm").json()
+    assert body["state"] == "warm"
+    assert body["ready"] is True
+    assert body["no_op"] is True
+    assert client.post("/warm", json={"lease_id": "abc"}).json()["lease_id"] == "abc"

@@ -38,6 +38,11 @@ from .core.tool import Context, MediaResponse
 
 log = logging.getLogger(__name__)
 
+#: Wire constant shared with the proxy's warm lease (hvym_img_tools/warm.py).
+#: Duplicated rather than imported so the worker stays free of the proxy's HTTP
+#: dependencies; tests assert the two definitions agree.
+WARM_TOOL = "__warm__"
+
 _CTX: Context | None = None
 _TOOLS: dict[str, Any] = {}
 
@@ -92,6 +97,25 @@ def handler(job: dict) -> dict:
         return {"error": "input must be an object"}
 
     name = payload.get("tool", "reangle")
+
+    # A keepalive from a client warm lease (hvym_img_tools/warm.py, docs/WARMING.md).
+    # Its entire purpose is to *be a completed job*, because that is what resets the
+    # endpoint's idleTimeout and keeps this process alive with models resident.
+    # Short-circuited before any pipeline work: at one ping every 8s, running
+    # reconstruction here would burn GPU seconds for the whole lease and produce
+    # nothing anyone reads.
+    #
+    # The literal is duplicated in warm.py rather than imported, so the worker does
+    # not take a dependency on the proxy's HTTP stack. It is a wire constant; a test
+    # asserts the two stay equal.
+    if name == WARM_TOOL:
+        return {
+            "warm": True,
+            "models": sorted(ctx.models.registered()),
+            "device": ctx.config.resolve_device(),
+            "elapsed": round(time.perf_counter() - started, 3),
+        }
+
     tool = _TOOLS.get(name)
     if tool is None:
         return {"error": f"unknown tool {name!r}; available: {sorted(_TOOLS)}"}

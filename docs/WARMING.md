@@ -47,6 +47,11 @@ unacceptable one for anything else.
 
 ## Product: a lease, held by the client
 
+**Implemented** — `POST/GET/DELETE /warm` on the proxy (`hvym_img_tools/warm.py`),
+with the worker-side `__warm__` short-circuit in `serverless.py`. Client contract
+in [CLIENT.md](CLIENT.md#warming).
+
+
 The moment a *client* asks for warmth, the switch model breaks — not because the
 mechanism differs, but because the failure mode does.
 
@@ -65,11 +70,29 @@ Three endpoints on the proxy, which already holds the RunPod key:
 
 | | |
 |---|---|
-| `POST /warm` | acquire or extend; returns `{state, elapsed, expires_at}` |
-| `GET /warm` | current state, for UI not holding a lease |
+| `POST /warm` | acquire or extend; returns `{lease_id, state, ready, elapsed_s, expires_at, lease_ttl_s, renew_within_s}` |
+| `GET /warm` | current state, for UI not holding a lease (unauthenticated: it spends nothing and cannot start a worker) |
 | `DELETE /warm` | explicit release when the artist flips it off |
 
-Refcount leases so two Inkternity instances behind one proxy do not pay twice.
+Leases are refcounted, so two Inkternity instances behind one proxy share one
+warm worker and do not pay twice. The last release stops the keepalive loop.
+
+**Two clocks, deliberately decoupled.** The client's renewal cadence and our
+keepalive cadence answer different questions and must not be tied together:
+
+| | Default | Env | Bound by |
+|---|---|---|---|
+| Lease TTL | 60 s | `HVYM_LEASE_TTL_S` | how long a crashed client may keep billing |
+| Renew within | 20 s | `HVYM_LEASE_RENEW_WITHIN_S` | must be well under the TTL, so a dropped poll is survivable |
+| Keepalive ping | 6 s | `HVYM_WARM_PING_INTERVAL_S` | **must stay under the endpoint's `idleTimeout` (10 s)** or the worker sleeps between pings |
+
+At these defaults two consecutive missed renewals are tolerated, and an
+abandoned lease releases within ~60 s — after which the worker sleeps on its own
+about 10 s later.
+
+The keepalive uses `/runsync` rather than `/run` on purpose: during a cold start
+it blocks instead of returning instantly, which stops the proxy queueing thirty
+no-op jobs across four minutes of container pull.
 
 **The renewal poll is the notification channel.** The client is already talking
 to the proxy every ~20 s to hold its lease, so the response carries state and
@@ -81,9 +104,11 @@ itself fails, the UI shows cold — which is correct, because it probably is.
 stays warm forever. Cheap no-op jobs that reset `idleTimeout` stop when the proxy
 stops, and the worker drops itself. The safe behaviour is the automatic one.
 
-*(Prototyping note: even a deliberately-invalid job is a completed job and resets
-the idle clock, so the lease loop can be built and tested before `serverless.py`
-grows a `__warm__` branch.)*
+`serverless.py` short-circuits `__warm__` before any pipeline work — at one ping
+every 8 s, running reconstruction would burn GPU seconds for the whole lease and
+produce nothing anyone reads. The sentinel is duplicated in `warm.py` rather than
+imported, so the worker takes no dependency on the proxy's HTTP stack; a test
+asserts the two definitions agree.
 
 ### Match the mechanism to the meaning
 
@@ -99,6 +124,11 @@ warm time**, not per image. The lease is therefore also the metering boundary:
 lease duration is the billable unit, and refcounting decides who is charged when
 sessions overlap. Design the lease record with that in mind from the start —
 retrofitting attribution onto an unmetered warm path is far harder.
+
+The `Lease` dataclass therefore carries `label` (client-supplied attribution),
+`acquired_wall`, `renewals` and a `held_s()` duration from the first commit, and
+every acquire/release/expiry emits a log line with them. That is the metering
+hook: no billing system yet, but nothing to reconstruct later either.
 
 ## Don't fake the ETA
 

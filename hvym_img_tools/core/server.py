@@ -13,7 +13,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import (
+    Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 
@@ -250,6 +252,31 @@ def create_app(config: Config | None = None, *, discover: bool = True) -> FastAP
             "models_loaded": models.loaded(),
             "cache": cache.stats(),
         }
+
+    # --- warm lease: a truthful no-op here ---------------------------------
+    # A persistent box does not scale to zero, so it is always warm and there is
+    # nothing to lease. Answering honestly (rather than 404ing) is what lets
+    # Inkternity ship ONE code path: the client holds a lease unconditionally,
+    # and against this deployment every call simply says "already warm".
+    # docs/WARMING.md, docs/CLIENT.md.
+    from ..warm import always_warm_view  # noqa: PLC0415 - avoids a cycle at import
+
+    @app.post("/warm", tags=["warm"], dependencies=guard)
+    async def warm_acquire(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - an empty body is valid
+            body = {}
+        lease_id = (body or {}).get("lease_id") if isinstance(body, dict) else None
+        return always_warm_view(str(lease_id) if lease_id else None)
+
+    @app.get("/warm", tags=["warm"])
+    def warm_status() -> dict:
+        return always_warm_view()
+
+    @app.delete("/warm", tags=["warm"], dependencies=guard)
+    def warm_release() -> dict:
+        return always_warm_view()
 
     return app
 

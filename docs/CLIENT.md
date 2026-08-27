@@ -79,6 +79,72 @@ the wait entirely with `scripts/warm.py on` ([WARMING.md](WARMING.md)).
 | `503` | proxy not configured | server-side misconfig — surface, don't retry |
 | `504` | exceeded the proxy's budget | the job may still finish; retry re-uses the cache |
 
+## Warming
+
+Cold start is the sharpest edge of this deployment (up to ~260 s, see above). The
+service lets a client hold a **lease** that keeps a GPU worker awake, so an artist
+who flips on "enable inference" pays the wait once instead of on every idle gap.
+
+```
+POST   /warm     X-API-Key: <key>   {"lease_id": "<opaque>", "label": "<optional>"}
+GET    /warm                        (no key required)
+DELETE /warm     X-API-Key: <key>   {"lease_id": "<opaque>"}
+```
+
+`POST /warm` acquires on first call and extends thereafter. Omit `lease_id` on the
+first call and the server issues one; send that same id back every time.
+
+```json
+{"lease_id": "9f2c...", "state": "warming", "ready": false,
+ "elapsed_s": 12.3, "expires_at": "2026-08-27T00:14:02+00:00",
+ "lease_ttl_s": 60.0, "renew_within_s": 20.0, "active_leases": 1}
+```
+
+| Field | Use |
+|---|---|
+| `state` | `cold` / `warming` / `warm` — drive the indicator from this |
+| `ready` | `true` only when a worker can serve *now* |
+| `elapsed_s` | seconds since warming began — show it, don't compute an ETA |
+| `renew_within_s` | **renew at least this often**, or the lease lapses |
+| `lease_ttl_s` | how long the current renewal bought |
+
+### The renew-within contract
+
+**Re-POST every `renew_within_s` (20 s by default) for as long as the toggle is
+on.** The lease lives `lease_ttl_s` (60 s), so two consecutive missed renewals are
+survivable, and a client that crashes, sleeps, or loses the network stops paying
+within about a minute without doing anything. That asymmetry is the point: silence
+means release.
+
+**The renewal poll is also the notification channel.** Every response carries the
+current state, so the UI needs no push, no WebSocket, and no reconnect logic — poll
+to hold the lease, and render whatever comes back. If the poll itself fails, show
+cold; it probably is.
+
+**Do not build your own keepalive.** The proxy pings the GPU internally every ~6 s,
+which is under the endpoint's 10 s idle timeout — that cadence is the server's
+business and is not something the client should mirror or tune. Your only job is to
+renew the lease.
+
+**Release explicitly** with `DELETE /warm` when the artist turns the toggle off, or
+on clean shutdown. It is idempotent, so a retry after a dropped response is safe.
+Not releasing is not a disaster — the lease lapses — but it wastes up to a minute
+of GPU time.
+
+### Notes
+
+- `/warm` uses the **same scoped key** as `/tools/reangle`. There is no second
+  credential, and no path here reaches the RunPod account key.
+- `GET /warm` is unauthenticated: it spends nothing and cannot start a worker, so
+  the UI can show a state indicator before the artist opts in.
+- Leases are **refcounted**. Two Inkternity instances behind one proxy share a
+  single warm worker rather than paying twice.
+- Against a **persistent-box deployment** (`core.server`, no scale-to-zero) `/warm`
+  is a truthful no-op returning `state: "warm", ready: true, no_op: true`. Hold a
+  lease unconditionally and the same client code works against either deployment.
+- **Warm time is billable** — it is the metered unit in the paid product, so treat
+  the toggle as something the artist turns on deliberately, not a default-on.
+
 ## Retries are cheap and safe
 
 Results are cached by `sha256(image + params)`, so **the same drawing and params

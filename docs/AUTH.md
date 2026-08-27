@@ -25,6 +25,22 @@ spending your GPU budget**, not data loss.
 
 ## Using it
 
+### What the key unlocks
+
+The same scoped key gates **`/tools/{name}`** and **`/warm`** — there is no second
+credential. A holder can ask for a mesh and ask for the GPU to be kept awake, and
+nothing else: no path behind this key reaches the RunPod account key, which stays
+in the proxy process (docs/WARMING.md).
+
+`GET /warm` and `GET /healthz` are deliberately **unauthenticated**. Both are
+read-only, expose no key or upstream URL, and cannot start a worker or spend GPU
+time — so a UI can show a status indicator before the artist has authenticated.
+
+Note that `/warm` costs money while held (warm time is the metered unit), so a
+leaked key spends more than one that can only request meshes. That is spend
+control, not an identity boundary — same as before; rotate on suspicion.
+
+
 **Server** — set one or more keys (comma-separated) and it turns on automatically:
 
 ```sh
