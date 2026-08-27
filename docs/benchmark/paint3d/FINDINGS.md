@@ -212,6 +212,49 @@ Either way the topology blocker is real but not fundamental: **a 6× to 50×
 reduction in chart count is available, and the cheap end of that range is
 free.** UV-space work is no longer ruled out.
 
+## Follow-up 3: do props actually behave better? (mostly no)
+
+The hallucinate design assumed props would be the easy case geometrically. Two
+real sketches were run through the **live reangle endpoint** — a chair (clean
+line art, thin legs, big gaps) and a rock (hatched, convex) — and the assumption
+does not survive contact.
+
+| subject | faces | baseline islands | decimate 10% | voxel 0.02 |
+|---|---|---|---|---|
+| character | 29,887 | 1,015 | IoU 0.976 | IoU 0.809 (+23.5%) |
+| **chair** | 31,731 | 835 | IoU 0.929 | **IoU 0.606 (+60.5%)** |
+| **rock** | **83,430** | **2,941** | IoU 0.969 | IoU 0.790 (+25.7%) |
+
+**The chair is the worst case for voxel remesh, not the best.** Adding 60.5% to
+the silhouette at pitch 0.02, because `.fill()` bridges straight across the gaps
+between the legs and under the seat. An open frame is precisely the geometry
+that voxelisation destroys — worse than a character's limbs.
+
+**The rock fragments worse than the character**, at 2,941 islands with a median
+of 22 texels, because TripoSR produced 83,430 faces for it — 2.6× the others. A
+tempting explanation is that the hatched sketch drove a noisier surface, but the
+measurement does not support it: the rock has *lower* edge density than the
+chair (8.1% vs 11.7%) and still produced far more geometry. **The cause of the
+face-count difference is unexplained**, and worth understanding before relying
+on any per-subject prediction.
+
+**Decimation holds up everywhere** — 0.929 / 0.969 / 0.976 across the three. It
+remains the safe universal choice, and the chair's slightly lower figure is thin
+legs losing width, which is visible and modest.
+
+### What this does and does not change
+
+It **does not** undermine the props framing, which rests on a product judgment
+that survives: style drift on a rock costs nothing, on your lead character it
+costs everything. And TripoSR reconstructs both props well — the chair comes back
+with four distinct legs, a proper seat and back (`props_silhouettes.png`, and the
+axis check behind it).
+
+It **does** kill the geometric half of the argument. "Props are easier to remesh"
+is measured false. Voxel remesh should be treated as unsafe for anything with an
+open frame, and the operating point cannot be chosen per-category — it has to be
+chosen per-mesh, or decimation used throughout.
+
 ## What survives
 
 Two things are worth keeping from this:

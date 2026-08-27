@@ -51,10 +51,17 @@ consequences worth designing around:
   at chairs and rocks; they are bad at *your specific character*. The tool plays
   to the strength instead of fighting the weakness.
 
-It also plays to a measured strength on the geometry side: voxel remeshing
-collapses chart count by welding nearby surfaces, which mangles a character with
-thin limbs and a gap between the legs, but should cost far less on a mostly
-convex prop (see [FINDINGS.md](../benchmark/paint3d/FINDINGS.md), Follow-up 2).
+**One caveat, measured and worth stating up front:** the argument above is a
+product judgment, not a geometric one. It was tempting to also claim props are
+*easier to reconstruct and remesh*. They are not — a real chair sketch turned out
+to be the **worst** case for voxel remeshing of everything tested (+60.5% silhouette,
+because voxel fill bridges the gaps between the legs), and a rock fragmented worse
+than the character at baseline. See
+[FINDINGS.md](../benchmark/paint3d/FINDINGS.md) Follow-up 3.
+
+What does hold: TripoSR reconstructs both props well, and quadric decimation is
+safe on all of them. The remesh operating point has to be chosen per-mesh, not
+per-category.
 
 The name still does real work: **`hallucinate` tells the artist it invents.** Do
 not soften it to `restyle` or `enhance`.
@@ -112,11 +119,14 @@ Geometry is **reangle's existing path** — matte, then TripoSR — plus a remes
 step. That reuse matters: it keeps one reconstruction implementation, and
 TripoSR is already warm in the model cache.
 
-The remesh is new and is measured (FINDINGS.md Follow-up 2). For props, voxel
-remesh at ~0.02 pitch is the candidate: 13.7× fewer UV charts, and its cost —
-bridging gaps between nearby surfaces — is much smaller on a convex object than
-on a character. Decimation to ~10% is the conservative fallback, nearly free on
-silhouette.
+The remesh is new and is measured (FINDINGS.md Follow-ups 2 and 3).
+**Use quadric decimation to ~10%**: ~6× fewer UV charts for 0.93–0.98 silhouette
+IoU across a character, a chair and a rock alike.
+
+Voxel remesh buys far more chart coherence (13–50×) but is **not safe by
+default** — on the chair it added 60.5% to the silhouette by bridging the gaps
+between the legs. If it is ever used it must be gated on a measured silhouette
+check per mesh, not chosen by category.
 
 ### Stage 2 is deliberately omitted
 
@@ -204,12 +214,12 @@ clean. Not researched yet.
 
 ## 8. Open questions
 
-1. **Does it hold up on props?** Everything measured so far used
-   `alice_char2` — a character, and close to the worst case for both voxel
-   remeshing and generative texturing. The intended inputs are chairs and rocks.
-   **This is now the most important untested assumption in the document**, and
-   it needs a real rough prop sketch to test honestly rather than a synthetic
-   one.
+1. **Does the *texture* hold up on props?** The geometry half is now measured
+   (Follow-up 3) and the answer was "not as assumed". What remains untested is
+   the part the tool actually depends on: whether depth-conditioned generation
+   produces a *better chair* than the artist's rough sketch. Diffusion models
+   are good at chairs, so this is plausible — but it is now the last unverified
+   link in the chain, and the prop meshes to test it on already exist.
 2. **Should `prompt` be exposed at all?** A free-text prompt is a wide surface —
    it invites results far from the drawing and is the main path to content we
    would rather not generate. A fixed internal prompt plus `strength` is

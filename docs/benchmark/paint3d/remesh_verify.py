@@ -44,6 +44,7 @@ def silhouette(m, size=SIL):
     v = v / np.abs(v).max()
     occ = np.zeros((size, size), bool)
     tri = v[m.faces][:, :, [1, 2]]            # H,V axes per preview_reangle
+    tri = tri * np.array([1.0, -1.0])         # image V grows downward
     tri = (tri * 0.45 + 0.5) * (size - 1)
     return raster_tris(tri.reshape(-1, 2) / (size - 1),
                        np.arange(len(tri) * 3).reshape(-1, 3), size)
