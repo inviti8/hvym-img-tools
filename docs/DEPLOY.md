@@ -163,6 +163,32 @@ swap the new container must answer `/healthz`, report `auth: true`, **and** reje
 an unauthenticated request; if any of those fail it puts the previous image back
 by itself. `tests/update_proxy_test.sh` exercises all of that, rollbacks included.
 
+### Pointing a tool at its own endpoint
+
+Tools run on separate serverless endpoints (`docs/tools/mesh.md`). The proxy
+resolves `RUNPOD_ENDPOINT_ID_<TOOL>` first and falls back to
+`RUNPOD_ENDPOINT_ID`, so a single-endpoint deployment keeps working untouched.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inviti8/hvym-img-tools/main/scripts/set_tool_endpoint.sh -o set_tool_endpoint.sh
+sudo bash set_tool_endpoint.sh mesh <endpoint-id>
+sudo bash set_tool_endpoint.sh --list
+sudo bash set_tool_endpoint.sh --remove mesh
+```
+
+Deliberately separate from `update_proxy.sh`: that changes which **image**
+runs, this changes **configuration**. Conflating them would mean you could not
+correct a wrong endpoint id without also pulling a new image.
+
+It backs up `proxy.env` before editing (that file holds the RunPod key),
+rewrites through a temp file, and restores the backup if the proxy fails to
+restart or come back healthy. `tests/set_tool_endpoint_test.sh` covers all of
+that, including that the key survives every failure path.
+
+**Per-tool routing needs proxy 0.3.0 or later.** On an older image the variable
+is simply ignored and every tool goes to the default endpoint — the script warns
+when it sees that.
+
 ### Measured footprint
 
 `ghcr.io/inviti8/hvym-img-proxy:0.1.0`, real image, real uploads:
