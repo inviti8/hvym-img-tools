@@ -42,6 +42,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # to replace it. Cheap to pre-empt; expensive to debug.
 RUN pip install --upgrade pip && pip install --ignore-installed blinker
 
+# A pip CONSTRAINTS file, not merely an install pin. kaolin's cython extensions
+# are built against the numpy 1 ABI, and a later `pip install` of transformers
+# or scipy will happily resolve numpy 2 back in -- which is exactly what broke
+# the first build of this image (numpy 2.4.6 reached the assertion below).
+# A constraint applies to every transitive resolution, so it cannot be undone.
+RUN printf 'numpy<2\n' > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
+
 RUN pip install "torch==${TORCH_VERSION}" torchvision --index-url ${TORCH_INDEX}
 
 # --- TRELLIS's dependencies ------------------------------------------------
@@ -61,6 +69,13 @@ RUN pip install "numpy<2" \
         imageio "imageio[ffmpeg]" opencv-python-headless scipy \
         fastapi "uvicorn[standard]" python-multipart pydantic httpx \
         runpod
+
+# Cheap check before spending minutes downloading weights: did the pin hold?
+RUN python -c "\
+import numpy; \
+assert numpy.__version__.startswith('1.'), \
+  'numpy drifted to %s despite PIP_CONSTRAINT' % numpy.__version__; \
+print('ok: numpy pinned at', numpy.__version__)"
 
 # --- TRELLIS source --------------------------------------------------------
 ARG TRELLIS_REF=main
