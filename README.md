@@ -75,6 +75,7 @@ identical either way. See [`docs/DEPLOY.md`](docs/DEPLOY.md) and
 | [`docs/WARMING.md`](docs/WARMING.md) | the demo warm switch vs. the product's client lease, and what warm costs |
 | [`docs/AUTH.md`](docs/AUTH.md) | API-key scheme, threat model, upgrade path |
 | [`docs/tools/reangle.md`](docs/tools/reangle.md) | the reference tool |
+| [`docs/tools/hallucinate.md`](docs/tools/hallucinate.md) | **design only** — the generative counterpart to reangle |
 
 Reangle's authoritative pipeline spec lives in the client repo:
 [`../infinipaint/docs/design/REANGLE_PIPELINE.md`](../infinipaint/docs/design/REANGLE_PIPELINE.md).
