@@ -776,3 +776,21 @@ def test_warm_targets_the_named_tool(env, monkeypatch):
 
     body = client.get("/warm", params={"tool": "mesh"}).json()
     assert body["active_leases"] == 1, "the mesh lease must not count reangle's"
+
+
+def test_cache_hit_still_reports_the_tool_version():
+    """A library keys assets on the version that produced them.
+
+    X-Tool-Version came only from the worker's MISS branch, so the header
+    vanished on exactly the responses that are fast -- the same asset returned
+    different metadata depending on cache state. Verified against the live
+    endpoint: MISS carried x-tool-version: 0.1.0, HIT carried none.
+    """
+    import inspect
+
+    import hvym_img_tools.serverless as sl
+
+    src = inspect.getsource(sl.run_tool if hasattr(sl, "run_tool") else sl.handler)
+    hit = src[src.index('"cached": True'):]
+    hit = hit[: hit.index("try:")] if "try:" in hit else hit
+    assert "tool_version" in hit, "cache hits must report the tool version too"

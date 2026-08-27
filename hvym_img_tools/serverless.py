@@ -166,6 +166,11 @@ def handler(job: dict) -> dict:
             "cached": True,
             "elapsed": round(time.perf_counter() - started, 3),
             "cache_key": key,
+            # Also on the hit path: a client keying a library on the version
+            # that produced an asset would otherwise lose it exactly when the
+            # response is fast. (filename cannot follow -- the cache stores
+            # bytes and a media type, not the name run() chose.)
+            "tool_version": tool.version,
         }
 
     try:
