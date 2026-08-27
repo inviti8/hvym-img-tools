@@ -132,6 +132,7 @@ class WarmPool:
         #: cold worker, turning a 2.7s job into a 137s wait.
         self._inflight = 0
         self._last_activity: float | None = None
+        self._inflight_since: float | None = None
 
     # ---------------------------------------------------------------- helpers
     @property
@@ -219,22 +220,40 @@ class WarmPool:
     # -------------------------------------------------------------- activity
     def request_started(self) -> None:
         """Told by the proxy when a real tool request begins."""
+        if self._inflight == 0:
+            self._inflight_since = self._clock()
         self._inflight += 1
         self._last_activity = self._clock()
 
     def request_finished(self) -> None:
         self._inflight = max(0, self._inflight - 1)
         self._last_activity = self._clock()
+        if self._inflight == 0:
+            self._inflight_since = None
 
     def _ping_needed(self) -> bool:
         """A ping is only worth sending when nothing else is keeping the worker
-        awake. Real work counts, and counts for longer than the ping interval so
-        we do not immediately follow a finished request with a redundant job."""
+        awake.
+
+        "In flight" is not the same as "executing". A request that RunPod has
+        merely QUEUED leaves the worker idle, so staying quiet for it lets the
+        worker sleep -- and the queued job then waits out a fresh cold start.
+        Measured: suppressing for the whole of a queued request turned a 0.024s
+        cache hit into a 199s wall. So the suppression is time-bounded: if a
+        request has not completed within a couple of ping intervals it is not
+        being served promptly, and keeping the worker alive matters more than
+        avoiding contention with it.
+        """
+        now = self._clock()
+        if self._inflight and self._inflight_since is not None:
+            if (now - self._inflight_since) < self.ping_interval_s * 2:
+                return False
+            return True          # queued, not executing -- keep the worker up
         if self._inflight:
             return False
         if self._last_activity is None:
             return True
-        return (self._clock() - self._last_activity) >= self.ping_interval_s
+        return (now - self._last_activity) >= self.ping_interval_s
 
     # ----------------------------------------------------------------- loop
     async def _tick(self) -> bool:

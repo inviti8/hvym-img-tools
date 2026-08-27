@@ -71,7 +71,12 @@ def main() -> int:
                     help="a network volume exists in exactly one data center, so the "
                          "endpoint must be pinned to the same one")
     ap.add_argument("--workers-min", type=int, default=0, help="0 = scale to zero")
-    ap.add_argument("--workers-max", type=int, default=2)
+    ap.add_argument("--workers-max", type=int, default=1,
+                    help="1 by default. With 2, a warm-lease request was measured "
+                         "being dispatched to a second, throttled worker and sitting "
+                         "IN_QUEUE for ~137s while a warm worker sat ready. One "
+                         "worker keeps the lease and the request on the same box. "
+                         "Raise it only when concurrent drawings actually need it.")
     ap.add_argument("--idle-timeout", type=int, default=10, help="seconds before a worker sleeps")
     ap.add_argument("--execution-timeout-ms", type=int, default=600_000)
     ap.add_argument("--container-disk-gb", type=int, default=30,
@@ -140,8 +145,12 @@ def main() -> int:
         template_id = existing_t["id"] if existing_t else "<new>"
     elif existing_t:
         template_id = existing_t["id"]
-        call("PATCH", f"/templates/{template_id}", key, template_body)
-        print(f"template: updated {template_id}")
+        # `isServerless` is accepted on create but rejected on update -- PATCH
+        # errors with "key provided in request body which is not in input
+        # schema" rather than ignoring it, so strip create-only fields here.
+        patch_body = {k: v for k, v in template_body.items() if k not in ("isServerless",)}
+        call("PATCH", f"/templates/{template_id}", key, patch_body)
+        print(f"template: updated {template_id} -> {args.image}")
     else:
         template_id = call("POST", "/templates", key, template_body)["id"]
         print(f"template: created {template_id}")

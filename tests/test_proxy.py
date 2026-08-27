@@ -597,11 +597,12 @@ def test_no_keepalive_while_a_real_request_is_in_flight(monkeypatch):
     clock = Clock()
 
     async def scenario():
-        pool = _pool(clock)
+        pool = _pool(clock, ping_interval_s=6.0)
         await pool.acquire("x")
         await pool.shutdown()                 # drive ticks by hand
 
         pool.request_started()
+        clock.advance(2)
         assert await pool._tick() is True     # lease still held...
         assert fake.warm_jobs == 0            # ...but no competing ping
 
@@ -616,19 +617,44 @@ def test_no_keepalive_while_a_real_request_is_in_flight(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_a_merely_queued_request_does_not_silence_the_keepalive(monkeypatch):
+    """The bug this exists to prevent: a request RunPod has only QUEUED leaves
+    the worker idle. Staying quiet for it let the worker sleep, and the queued
+    job then waited out a fresh cold start -- a 0.024s cache hit measured at
+    199s wall. Suppression must therefore be time-bounded."""
+    fake = FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock, ping_interval_s=6.0, lease_ttl_s=600.0)
+        await pool.acquire("x")
+        await pool.shutdown()
+
+        pool.request_started()                # ...and it sits in RunPod's queue
+        clock.advance(3)
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 0, "brief overlap is still suppressed"
+
+        clock.advance(30)                     # still not served
+        assert await pool._tick() is True
+        assert fake.warm_jobs >= 1, "a stalled request must not let the worker sleep"
+
+    asyncio.run(scenario())
+
+
 def test_overlapping_requests_keep_the_ping_suppressed(monkeypatch):
     fake = FakeRunPod(ready=1).install(monkeypatch)
     clock = Clock()
 
     async def scenario():
-        pool = _pool(clock)
+        pool = _pool(clock, ping_interval_s=6.0)
         await pool.acquire("x")
         await pool.shutdown()
 
         pool.request_started()
         pool.request_started()                # two artists at once
         pool.request_finished()               # one finishes
-        clock.advance(pool.ping_interval_s + 1)   # < lease TTL, so still held
+        clock.advance(2)                      # inside the suppression window
         assert await pool._tick() is True
         assert fake.warm_jobs == 0, "one request still in flight"
 

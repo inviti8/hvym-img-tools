@@ -130,6 +130,29 @@ The `Lease` dataclass therefore carries `label` (client-supplied attribution),
 every acquire/release/expiry emits a log line with them. That is the metering
 hook: no billing system yet, but nothing to reconstruct later either.
 
+### Measured against the live endpoint
+
+Endpoint `69j3vhp0el0wv0`, image `0.1.1`, lease renewed every 15 s:
+
+| | |
+|---|---|
+| Cold ➜ `state: "warm"` | **26 s** |
+| Request while leased | `X-Cache: MISS`, **2.527 s** of upstream work |
+| Same, unleased/cold | ~50-260 s (BENCHMARK.md §6b) |
+| Release ➜ `state: "cold"` | **1-2 s**, and the worker sleeps ~10 s later |
+
+**`workersMax` matters more than it looks.** At 2, a request issued while a lease
+was held got dispatched to a *second, throttled* worker and sat `IN_QUEUE` for
+~137 s while a warm worker sat ready. EU-RO-1 has shown a persistent
+`throttled: 1` all along. At 1 the lease and the request share the same box and
+the queueing disappeared. `deploy_runpod.py` therefore defaults to 1; raise it
+only when concurrent drawings genuinely need it.
+
+**Wall-clock from a laptop is not the service's latency.** The same cache hit
+(0.026 s of work) measured 4.5 s earlier in the day and 83 s later, purely
+because this machine's uplink degraded — it carries ~745 KB up and ~665 KB down
+per request. Judge warmth by `x-upstream-elapsed`, not by the stopwatch.
+
 ## Don't fake the ETA
 
 Cold start is ~260 s onto a host without the image but ~48 s onto one that has
