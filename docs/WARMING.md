@@ -153,6 +153,32 @@ only when concurrent drawings genuinely need it.
 because this machine's uplink degraded — it carries ~745 KB up and ~665 KB down
 per request. Judge warmth by `x-upstream-elapsed`, not by the stopwatch.
 
+## Measured: mesh through nginx, 2026-08-27
+
+One cold request for `/tools/mesh` end to end through `https://img.hvym.link`,
+endpoint `km99b7mrj2f85r`, zero ready workers and `throttled: 1` at dispatch:
+
+| | |
+|---|---|
+| Total wall clock | **547 s** |
+| `X-Upstream-Elapsed` (real GPU work) | **8.699 s** |
+| Everything else -- placement + cold boot | ~538 s |
+| Result | 200, 360,504 B, valid `glTF` |
+
+A warm repeat of the same sketch: 4.4-4.9 s wall, `X-Cache: HIT`,
+`X-Upstream-Elapsed: 0.025` -- the volume-backed result cache answering.
+
+Two things to take from it. **98% of a cold request is waiting for hardware**,
+so tuning inference buys nothing next to holding a worker. And nginx's
+`proxy_read_timeout` has to clear 547 s: at the old 300 s default this exact
+request came back as a 504 HTML page after five minutes, having completed
+successfully on RunPod the whole time. It is 900 s now.
+
+**Don't read the queue from `/v2/{id}/health`.** During that run it reported
+`inQueue: 1, completed: 15` well after the job had returned. It is the same
+endpoint whose `workers.ready` once hid a warm worker from us. Trust the
+client's stopwatch and `X-Upstream-Elapsed`; treat the health counts as a hint.
+
 ## Don't fake the ETA
 
 Cold start is ~260 s onto a host without the image but ~48 s onto one that has
