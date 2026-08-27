@@ -59,6 +59,12 @@ PING_INTERVAL_S = float(os.environ.get("HVYM_WARM_PING_INTERVAL_S", "6"))
 #: queue a ping every few seconds for four minutes. This bounds that block.
 PING_TIMEOUT_S = float(os.environ.get("HVYM_WARM_PING_TIMEOUT_S", "90"))
 
+#: The RunPod endpoint's idleTimeout. Not ours to set, but every keepalive
+#: decision depends on it: miss a ping for longer than this and the worker we
+#: are paying a lease to keep awake goes to sleep anyway. Keep
+#: PING_INTERVAL_S safely under it (a test asserts this).
+IDLE_TIMEOUT_S = float(os.environ.get("HVYM_WARM_IDLE_TIMEOUT_S", "10"))
+
 #: GET /warm is a UI poll; don't re-ask RunPod for worker counts on every call.
 HEALTH_CACHE_S = 3.0
 
@@ -244,29 +250,29 @@ class WarmPool:
             self._inflight_since = None
 
     def _ping_needed(self) -> bool:
-        """A ping is only worth sending when nothing else is keeping the worker
-        awake.
+        """Whether to send a keepalive now.
 
-        "In flight" is not the same as "executing". A request that RunPod has
-        merely QUEUED leaves the worker idle, so staying quiet for it lets the
-        worker sleep -- and the queued job then waits out a fresh cold start.
-        Measured: suppressing for the whole of a queued request turned a 0.024s
-        cache hit into a 199s wall. So the suppression is time-bounded: if a
-        request has not completed within a couple of ping intervals it is not
-        being served promptly, and keeping the worker alive matters more than
-        avoiding contention with it.
+        This used to go quiet while a request was in flight, on the theory that
+        the request itself keeps the worker awake. It does not: "in flight" is
+        not "executing", and a job RunPod has merely QUEUED leaves the worker
+        idle. Going quiet for it lets the worker sleep, and the queued job then
+        waits out a fresh cold start -- which is the artist waiting minutes on
+        an endpoint they deliberately warmed.
+
+        That was measured once (a 0.024s cache hit taking 199s wall) and
+        "fixed" by time-bounding the silence to two ping intervals. Two
+        intervals is 12s and the endpoint sleeps at 10s, so the hole stayed
+        open by two seconds and the same failure came back: a warm, leased
+        endpoint queued a request for ~3 minutes.
+
+        So: while a lease is held, keep pinging. A __warm__ job is short-
+        circuited on the worker before any pipeline work, so the contention the
+        suppression was avoiding costs milliseconds -- against a cold start.
         """
         now = self._clock()
-        if self._inflight and self._inflight_since is not None:
-            if (now - self._inflight_since) < self.ping_interval_s * 2:
-                return False
-            return True          # queued, not executing -- keep the worker up
-        if self._inflight:
-            return False
         if self._last_activity is None:
             return True
         return (now - self._last_activity) >= self.ping_interval_s
-
     # ----------------------------------------------------------------- loop
     async def _tick(self) -> bool:
         """One keepalive iteration. Returns False when the pool has gone idle.
