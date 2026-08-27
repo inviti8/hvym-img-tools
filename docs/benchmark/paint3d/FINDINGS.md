@@ -418,10 +418,26 @@ lands in `ReangleInput`'s existing `backbone` field rather than a redesign. It
 would improve **reangle** too: a chair or ladder in a scene fails there for
 exactly the same reason.
 
-Open: TRELLIS scored only 71.6% on the character, below both props. That run fed
-the raw image rather than our matted RGBA, so it is probably not a fair
-comparison — worth re-running through the real matte before drawing any
-conclusion about characters.
+### The character's 71.6% was the metric's fault, not the model's
+
+Shaded turntables (`trellis_models.png`) show the character coming back as a
+clean, complete figure — ponytail, arms, boots, correct proportions — despite
+scoring below both props. Breaking down the components explains it:
+
+| component | faces | share | extent |
+|---|---|---|---|
+| #0 | 126,516 | 71.6% | 0.29 × 0.25 × 1.00 |
+| #1 | 43,244 | 24.5% | 0.21 × 0.13 × 0.65 |
+| #2–9 | < 1,900 each | ~3% total | tiny |
+
+The top two together are 96%, and the small pieces are detached details rather
+than a broken figure. **Largest-component fraction is a good detector of the
+chair failure but a poor score on its own** — it cannot tell "shattered" from
+"one body plus a separate limb". Any automatic geometry health check should use
+the top-N share, or pair the number with a look.
+
+That also means TRELLIS handles characters well, so the backbone swap is not
+props-only — it is a candidate for reangle's main path too.
 
 ## What survives
 
