@@ -324,6 +324,18 @@ worker; only the proxy's reading of the reply was wrong. Fixed by polling
 
 ---
 
+## 6c. Generative texturing evaluated and rejected
+
+Paint3D and MVPaint were tested as a possible replacement for (or supplement to)
+the front-projection. **Neither is adopted.** MVPaint ships with no license at
+all; Paint3D is cleanly Apache-2.0 but regenerates the character rather than
+moving it, and its UV inpainter turns our marching-cubes atlas into grey mush.
+It also costs ~56 s of GPU against the pipeline's 1.9 s.
+
+Full write-up and images: [`benchmark/paint3d/FINDINGS.md`](benchmark/paint3d/FINDINGS.md).
+
+---
+
 ## 7. Reproducing
 
 ```sh
