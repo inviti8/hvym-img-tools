@@ -18,9 +18,18 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
 ARG TORCH_VERSION=2.8.0
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
-# Ada (RTX 4090) = 8.9, Ampere (A40/A6000/A5000/3090) = 8.6, L4/L40S = 8.9.
-# Build for both so the image runs on any serverless tier we might land on.
-ARG TORCH_CUDA_ARCH_LIST="8.6;8.9"
+# torchmcubes is compiled here, so this list is exactly the hardware the image
+# can run on. A card outside it fails at RUNTIME with "no kernel image is
+# available for execution on the device" -- the build says nothing.
+#
+# 8.6 (A40/A6000/A5000/3090) + 8.9 (4090/L4/L40S) alone left us on two GPU
+# pools in EU-RO-1 and RunPod throttled us ~9 min waiting for one. Widened to
+# the pools that actually hold stock there:
+#   8.0  = A100 40/80GB                  (AMPERE_80)
+#   9.0  = H100                          (HOPPER_141)
+#   12.0 = RTX PRO 4500/6000 Blackwell -- the only High-stock card in EU-RO-1
+# +PTX embeds forward-compatible PTX so a newer arch can JIT instead of fail.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0+PTX"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \

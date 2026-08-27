@@ -20,6 +20,12 @@ on:
         description: "push to GHCR"
         type: boolean
         default: true
+      only:
+        # The mesh image is ~6.5GB and takes the longest, so a change that
+        # touches one image should not drag the other two through a rebuild.
+        description: "build only these images (comma-separated: proxy,mesh,gpu)"
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -30,6 +36,7 @@ jobs:
   proxy:
     # Small and fast (~270 MB), so it is a separate job -- no reason to make the
     # proxy wait behind the GPU image.
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',proxy,') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,6 +68,7 @@ jobs:
   mesh:
     # TRELLIS worker. Separate job so it builds in parallel with the reangle
     # image rather than serialising two multi-GB builds.
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',mesh,') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -98,6 +106,7 @@ jobs:
           cache-from: type=gha,scope=mesh
 
   gpu:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',gpu,') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
