@@ -88,6 +88,10 @@ jobs:
           context: .
           file: docker/Dockerfile.mesh
           push: ${{ inputs.push != false }}
+          # Optional: raises HuggingFace's rate limit for the weight download.
+          # The build retries without it, but anonymous CI traffic gets 429s.
+          secrets: |
+            hf_token=${{ secrets.HF_TOKEN }}
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-mesh:${{ steps.meta.outputs.tag }}
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-mesh:latest
