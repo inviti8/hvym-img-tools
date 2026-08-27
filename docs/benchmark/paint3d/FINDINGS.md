@@ -352,6 +352,77 @@ worker cannot serve on the tier we deploy to. Either the bound should drop to
 384, or the tool should catch the OOM and return a useful error instead of a
 502. Worth fixing regardless of the backbone question.
 
+## Follow-up 6: TRELLIS fixes the geometry
+
+The chair failure was TripoSR's implicit field, not extraction (Follow-up 5), so
+the fix had to be a different backbone. Candidates were filtered on licence
+first — the gate that killed Wonder3D and MVPaint.
+
+| backbone | code | weights | verdict |
+|---|---|---|---|
+| **microsoft/TRELLIS** | **MIT** | **MIT** (2.6M downloads) | tested |
+| TencentARC/InstantMesh | Apache-2.0 | Apache-2.0 | viable, untested |
+| Hunyuan3D-2 | NOASSERTION | — | community licence, not permissive |
+| stable-fast-3d | NOASSERTION | — | community licence, not permissive |
+
+TRELLIS is MIT for **both** code and weights, so adopting it costs nothing off
+the "MIT end to end" claim — unlike the OpenRAIL-M compromise the Paint3D route
+would force.
+
+### Results
+
+Same metric as Follow-up 5: largest connected component, since a sound object is
+one shell.
+
+| subject | TripoSR | **TRELLIS** | TRELLIS time |
+|---|---|---|---|
+| **chair** | 57.7% (14 parts) | **98.6%** (4 parts) | 4.5 s |
+| **rock** | 93.4% (7 parts) | **100.0%** (2 parts) | 7.0 s |
+| character | — | 71.6% (10 parts) | 3.7 s |
+
+`trellis_vs_triposr.png` shows it plainly: TripoSR's chair is a ragged skeleton
+with broken legs, TRELLIS's is a clean solid chair with a slatted back, an intact
+seat and four legs. The rock goes from a holed shell to a solid form.
+
+**It is not slower.** 3.7–7.0 s against TripoSR's 1.9–4.7 s, plus a one-off 14.2 s
+model load per worker. The assumption that better geometry meant a 10× cost is
+wrong.
+
+### The real costs
+
+**Mesh density: 10–15× more faces.** Chair 31,731 → 331,560; rock 83,430 →
+1,214,456, giving a 20.8 MB `.glb`. That is far too heavy to ship to a client as
+is — but decimation is nearly free (Follow-up 3: 10% of faces keeps 97.6% of the
+silhouette), so this is a solved problem, just a mandatory step rather than an
+optional one.
+
+**Installation is genuinely painful.** Their `setup.sh` failed silently on
+several submodules. Six separate fixes were needed, recorded so nobody repeats
+the afternoon:
+
+| problem | fix |
+|---|---|
+| `blinker` distutils conflict | `pip install --ignore-installed blinker` |
+| relative `ckpts/...` read as a repo id → 401 | `snapshot_download` then `chdir` into it before `from_pretrained` |
+| `xformers` missing | `xformers==0.0.28.post1` from the cu124 index |
+| `xops.fmha.BlockDiagonalMask` gone | alias it from `xops.fmha.attn_bias` |
+| `spconv` missing | `pip install spconv-cu124 utils3d` |
+| kaolin numpy ABI error | `numpy<2` (same pin Paint3D needed) |
+
+`nvdiffrast` is **not** required for mesh output — it is only used for rendering.
+
+### What this changes
+
+The chair is no longer a reason the hallucinate tool cannot work, and the fix
+lands in `ReangleInput`'s existing `backbone` field rather than a redesign. It
+would improve **reangle** too: a chair or ladder in a scene fails there for
+exactly the same reason.
+
+Open: TRELLIS scored only 71.6% on the character, below both props. That run fed
+the raw image rather than our matted RGBA, so it is probably not a fair
+comparison — worth re-running through the real matte before drawing any
+conclusion about characters.
+
 ## What survives
 
 Two things are worth keeping from this:
