@@ -471,12 +471,17 @@ rm -f "$FINGERPRINT_BEFORE"
 
 # ------------------------------------------------------------------- final check
 step "Verify"
-scheme="https"; [ "$DO_TLS" -eq 1 ] || scheme="http"
-health=$(curl -fsS -m 20 "$scheme://$DOMAIN/healthz" 2>/dev/null || true)
+# Ask what the box actually has, not what this run was asked to do. --retune
+# sets DO_TLS=0 to skip certbot, which is not the same as "this site is http" --
+# reading the flag reported an http:// client URL for a site certbot had already
+# moved to https, and printed the 301 redirect page as the health check result.
+scheme="http"; cert_exists && scheme="https"
+health=$(curl -fsSL -m 20 "$scheme://$DOMAIN/healthz" 2>/dev/null || true)
 if [ -n "$health" ]; then
   ok "$scheme://$DOMAIN/healthz -> $health"
 else
-  code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$scheme://$DOMAIN/healthz" 2>/dev/null || echo 000)
+  code=$(curl -sL -o /dev/null -w '%{http_code}' -m 20 "$scheme://$DOMAIN/healthz" 2>/dev/null)
+  [ -n "$code" ] || code=000
   case "$code" in
     502|503) warn "$code from the vhost -- nginx is fine, the proxy container is not up.
          run: sudo bash install_proxy.sh --status" ;;

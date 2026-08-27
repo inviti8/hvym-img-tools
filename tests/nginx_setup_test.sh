@@ -142,6 +142,23 @@ if printf '%s' "$out" | grep -q "==> TLS"; then
 else echo "  [PASS] never entered the TLS step"; PASS=$((PASS+1)); fi
 
 echo
+echo "=========== TEST: --retune reports the scheme the box really serves ==========="
+# --retune skips certbot, which is not the same as "this site is http". Reading
+# the DO_TLS flag handed the client an http:// URL for a site already on https,
+# and printed the 301 redirect page as the health result.
+mkdir -p /etc/letsencrypt/live/img.test
+touch /etc/letsencrypt/live/img.test/fullchain.pem
+out=$(bash /work/setup_nginx.sh img.test --retune --read-timeout 900 2>&1)
+check "client URL is https"    "https://img.test/tools" "$out"
+if printf '%s' "$out" | grep -q "http://img.test/tools"; then
+  echo "  [FAIL] still advertising a plain-http client URL"; FAIL=$((FAIL+1))
+else echo "  [PASS] no plain-http client URL"; PASS=$((PASS+1)); fi
+if printf '%s' "$out" | grep -q "301 Moved Permanently"; then
+  echo "  [FAIL] printed the redirect page as the health check"; FAIL=$((FAIL+1))
+else echo "  [PASS] no redirect page in the health check"; PASS=$((PASS+1)); fi
+rm -rf /etc/letsencrypt/live/img.test
+
+echo
 echo "=========== TEST: --retune refuses a foreign vhost ==========="
 cat > /etc/nginx/sites-available/authen.test.bak2 <<'X'
 server { listen 80; server_name nope.test; }
