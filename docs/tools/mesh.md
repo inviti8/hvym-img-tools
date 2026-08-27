@@ -1,6 +1,7 @@
 # mesh — sketch to an untextured 3D reference
 
-**Status (2026-08-27): DESIGN, greenlit. Not implemented.** Every number here is
+**Status (2026-08-27): LIVE.** Endpoint `km99b7mrj2f85r`, image
+`ghcr.io/inviti8/hvym-img-mesh:0.3.0`. Verified end to end through the proxy. Every number here is
 measured; sources are in
 [`../benchmark/paint3d/FINDINGS.md`](../benchmark/paint3d/FINDINGS.md).
 
@@ -163,6 +164,40 @@ Two consequences worth designing for now rather than retrofitting:
 - **Reuse is where the value is.** A reference drawn over once is a novelty; a
   reference placed in twenty frames changes how a scene gets built. The 4–7 s
   cost amortises to nothing.
+
+## 6b. Measured on the live endpoint
+
+Chair and rock sketches through the real chain (proxy → RunPod → worker):
+
+| | |
+|---|---|
+| Steady-state work | **4.1 s** |
+| First job on a fresh worker | **~57 s** |
+| Cache hit | 0.015 s |
+| Output | exactly 20,000 faces, **0.35 MB**, untextured, 99.9% one component |
+| `X-Cache-Key` | returned, stable across repeats |
+
+Decimation and file size landed exactly where the design predicted, and the
+delivered chair still reads as a chair (`../benchmark/mesh_endpoint_live.png`).
+
+### The warm lease does not warm this tool properly
+
+**A held lease reports `warm`, and the next real job still costs ~57 s.** Only
+the job after that drops to 4.1 s — a 14× difference that a client would
+experience as the tool being wildly inconsistent.
+
+The cause is our own keepalive. `serverless.py` short-circuits `__warm__` before
+any pipeline work, precisely so a ping every few seconds costs no GPU time. That
+keeps the *process* alive but never runs a kernel, so CUDA/spconv initialisation
+is still paid by the first genuine request. For TripoSR this was invisible —
+its whole job is ~2 s. TRELLIS makes it a ~54 s surprise.
+
+**Fix (not yet applied, needs an image rebuild):** run one tiny inference inside
+`init()` when `HVYM_WARM_ON_STARTUP` is set, so the cost lands once at worker
+startup where it belongs, rather than on an artist's first request. Do *not*
+move it into the `__warm__` ping — that would pay it every few seconds.
+
+Until then, quote **~57 s for the first request after idle** rather than 4 s.
 
 ## 7. What is measured, and what is not
 
