@@ -1,6 +1,11 @@
 # hallucinate — AI-generated props and set dressing
 
-**Status (2026-08-27): DESIGN. Not implemented.** This is the plan; nothing is
+> **SUPERSEDED by [`mesh.md`](mesh.md).** Testing showed the mesh is the
+> valuable part and the texture is drawn over anyway — so dropping generative
+> texturing removes the OpenRAIL-M licensing compromise, ~25 s of work, and
+> 6–8 GB of weights at no cost. This file is kept as the record of *why*.
+
+**Status (2026-08-27): DESIGN. Not implemented, and not planned.** This is the plan; nothing is
 built. Grounded in the measured evaluation in
 [`../benchmark/paint3d/FINDINGS.md`](../benchmark/paint3d/FINDINGS.md).
 
