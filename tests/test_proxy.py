@@ -586,6 +586,75 @@ def test_state_comes_from_real_worker_readiness(monkeypatch):
     asyncio.run(scenario())
 
 
+# --- keepalives must yield to real work ------------------------------------
+# Found the hard way against the live endpoint: a keepalive firing alongside a
+# real request let RunPod dispatch that request to a SECOND, cold worker. The
+# handler itself took 2.681s; the client waited 137s. A tool request is already
+# a job, so it resets idleTimeout on its own and a ping beside it is contention.
+
+def test_no_keepalive_while_a_real_request_is_in_flight(monkeypatch):
+    fake = FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("x")
+        await pool.shutdown()                 # drive ticks by hand
+
+        pool.request_started()
+        assert await pool._tick() is True     # lease still held...
+        assert fake.warm_jobs == 0            # ...but no competing ping
+
+        pool.request_finished()
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 0, "still too soon after the request finished"
+
+        clock.advance(pool.ping_interval_s + 1)
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 1            # idle again -> ping resumes
+
+    asyncio.run(scenario())
+
+
+def test_overlapping_requests_keep_the_ping_suppressed(monkeypatch):
+    fake = FakeRunPod(ready=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("x")
+        await pool.shutdown()
+
+        pool.request_started()
+        pool.request_started()                # two artists at once
+        pool.request_finished()               # one finishes
+        clock.advance(pool.ping_interval_s + 1)   # < lease TTL, so still held
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 0, "one request still in flight"
+
+        pool.request_finished()
+        clock.advance(pool.ping_interval_s + 1)
+        assert await pool._tick() is True
+        assert fake.warm_jobs == 1
+
+    asyncio.run(scenario())
+
+
+def test_proxy_notifies_the_pool_around_a_request(env, monkeypatch):
+    """The counter must return to zero even when the upstream call fails, or
+    keepalives stay suppressed for the rest of the lease."""
+    FakeUpstream().install(monkeypatch, raises=httpx.ConnectError("boom"))
+    app = proxy_mod.create_app()
+    pool = app.state.warm_pool
+    resp = TestClient(app).post(
+        "/tools/reangle",
+        files={"image": ("a.png", b"x", "image/png")},
+        headers={"X-API-Key": GOOD},
+    )
+    assert resp.status_code == 502
+    assert pool._inflight == 0, "a failed request must still release the ping suppression"
+
+
 # --- the direct-server no-op ----------------------------------------------
 
 def test_direct_server_warm_is_a_harmless_noop(monkeypatch):

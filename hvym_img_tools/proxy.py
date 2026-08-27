@@ -180,6 +180,12 @@ def create_app() -> FastAPI:
         started = time.perf_counter()
         auth_header = {"Authorization": f"Bearer {runpod_key}"}
 
+        # A real request is itself a job, so it resets the worker's idleTimeout.
+        # Telling the warm pool suppresses its keepalive for the duration: firing
+        # one alongside this request is pure contention, and was measured letting
+        # RunPod dispatch the request to a second, cold worker.
+        pool.request_started()
+
         def _check(resp: httpx.Response) -> dict:
             if resp.status_code >= 400:
                 log.error("runpod returned %s", resp.status_code)
@@ -219,6 +225,8 @@ def create_app() -> FastAPI:
         except httpx.HTTPError as exc:
             # Deliberately does not echo the upstream URL or key material.
             raise HTTPException(status_code=502, detail=f"upstream error: {type(exc).__name__}") from exc
+        finally:
+            pool.request_finished()
 
         if status not in (None, "COMPLETED"):
             detail = body.get("error") or f"job status {status}"

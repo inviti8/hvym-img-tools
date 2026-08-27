@@ -125,6 +125,14 @@ class WarmPool:
         self._health_checked_at: float | None = None
         self._pings = 0
 
+        #: Real work in flight, and when it last finished. A tool request is
+        #: itself a job, so it resets idleTimeout exactly like a ping does --
+        #: pinging alongside it is pure contention. Measured: a keepalive firing
+        #: next to a real request let RunPod dispatch the request to a SECOND,
+        #: cold worker, turning a 2.7s job into a 137s wait.
+        self._inflight = 0
+        self._last_activity: float | None = None
+
     # ---------------------------------------------------------------- helpers
     @property
     def configured(self) -> bool:
@@ -208,6 +216,26 @@ class WarmPool:
             # Never surface upstream detail: it can carry the endpoint URL.
             log.debug("warm: keepalive ping failed", exc_info=True)
 
+    # -------------------------------------------------------------- activity
+    def request_started(self) -> None:
+        """Told by the proxy when a real tool request begins."""
+        self._inflight += 1
+        self._last_activity = self._clock()
+
+    def request_finished(self) -> None:
+        self._inflight = max(0, self._inflight - 1)
+        self._last_activity = self._clock()
+
+    def _ping_needed(self) -> bool:
+        """A ping is only worth sending when nothing else is keeping the worker
+        awake. Real work counts, and counts for longer than the ping interval so
+        we do not immediately follow a finished request with a redundant job."""
+        if self._inflight:
+            return False
+        if self._last_activity is None:
+            return True
+        return (self._clock() - self._last_activity) >= self.ping_interval_s
+
     # ----------------------------------------------------------------- loop
     async def _tick(self) -> bool:
         """One keepalive iteration. Returns False when the pool has gone idle.
@@ -220,7 +248,8 @@ class WarmPool:
             alive = bool(self._leases)
         if not alive:
             return False
-        await self._ping()
+        if self._ping_needed():
+            await self._ping()
         await self._get_health(force=True)
         return True
 
