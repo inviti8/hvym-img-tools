@@ -144,6 +144,15 @@ sudo bash update_proxy.sh --status
 sudo bash update_proxy.sh --rollback
 ```
 
+**Pin a version; do not deploy `:latest`.** Both are published, and `latest`
+works, but it is a moving target — the next build silently changes what runs on
+the box. The updater warns if you pass it.
+
+Rollback records the image's **digest**, not the tag it was started with. That
+distinction matters precisely for moving tags: rolling back "to
+`ghcr.io/...:latest`" would restart whatever `latest` points at *now*, reporting
+success while changing nothing.
+
 Configuration in `/etc/hvym-img-tools/proxy.env` is reused untouched, so keys and
 the endpoint id survive an update and are never re-prompted. nginx is not touched
 either — same container name, same `127.0.0.1:8080`.

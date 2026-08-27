@@ -59,7 +59,16 @@ require_docker() {
 }
 
 running_image() {
+  # The tag it was started with -- good for display, useless for rollback.
   docker inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null || true
+}
+
+running_digest() {
+  # The immutable image ID. Rollback MUST use this: a moving tag like :latest
+  # resolves to whatever was pulled most recently, so rolling back "to
+  # ghcr.io/...:latest" would restart the very image you are trying to leave --
+  # reporting success while changing nothing.
+  docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------ status
@@ -71,6 +80,7 @@ if [ "$ACTION" = "status" ]; then
     exit 1
   fi
   echo "  image:    $cur"
+  echo "  digest:   $(running_digest)"
   [ -f "$PREV_FILE" ] && echo "  previous: $(cat "$PREV_FILE")"
   docker ps -f "name=^${NAME}$" --format '  status:   {{.Status}}'
   docker stats --no-stream --format '  usage:    mem {{.MemUsage}}  cpu {{.CPUPerc}}' "$NAME"
@@ -86,10 +96,25 @@ require_docker
 # ---------------------------------------------------------------- rollback
 if [ "$ACTION" = "rollback" ]; then
   [ -f "$PREV_FILE" ] || die "no previous image recorded; nothing to roll back to"
-  TARGET=$(cat "$PREV_FILE")
-  step "Rolling back to $TARGET"
+  prev_tag=$(awk '{print $1}' "$PREV_FILE")
+  prev_digest=$(awk '{print $2}' "$PREV_FILE")
+  if [ -n "$prev_digest" ] && docker image inspect "$prev_digest" >/dev/null 2>&1; then
+    TARGET="$prev_digest"
+    step "Rolling back to $prev_tag"
+    ok "resolved to $prev_digest"
+  else
+    TARGET="$prev_tag"
+    step "Rolling back to $prev_tag"
+    warn "the previous image ID is no longer present locally; falling back to the tag."
+    warn "If that tag has since moved, this may not be the build you had before."
+  fi
 else
   TARGET="${REGISTRY}:${TAG}"
+  case "$TAG" in
+    latest|main|edge)
+      warn "'$TAG' is a moving tag: a later build silently changes what runs here."
+      warn "Pin a version (e.g. 'sudo bash $0 ${DEFAULT_TAG}') for anything reproducible." ;;
+  esac
 fi
 
 CURRENT=$(running_image)
@@ -113,8 +138,10 @@ ok "pulled (the running proxy is still untouched)"
 
 # --------------------------------------------------------------------- swap
 step "Swapping the container"
+CURRENT_DIGEST=$(running_digest)
 if [ -n "$CURRENT" ]; then
-  printf '%s\n' "$CURRENT" > "$PREV_FILE"
+  # Store both: the tag reads well in output, the digest is what rollback runs.
+  printf '%s %s\n' "$CURRENT" "$CURRENT_DIGEST" > "$PREV_FILE"
   chmod 600 "$PREV_FILE"
   docker rm -f "$NAME" >/dev/null 2>&1 && ok "stopped the old container"
 fi
@@ -131,7 +158,7 @@ start_container() {
 if ! start_container "$TARGET"; then
   warn "the new container failed to start; restoring $CURRENT"
   docker rm -f "$NAME" >/dev/null 2>&1
-  start_container "$CURRENT" && die "rolled back to $CURRENT -- the update did not apply" \
+  start_container "${CURRENT_DIGEST:-$CURRENT}" && die "rolled back to $CURRENT -- the update did not apply" \
     || die "could not restart the old image either. Run: sudo bash install_proxy.sh"
 fi
 ok "started $NAME on $TARGET"
@@ -149,7 +176,7 @@ rollback_now() { # $1 = why
   docker logs --tail 30 "$NAME" 2>&1 | sed 's/^/    /' || true
   if [ -n "$CURRENT" ]; then
     docker rm -f "$NAME" >/dev/null 2>&1
-    if start_container "$CURRENT"; then
+    if start_container "${CURRENT_DIGEST:-$CURRENT}"; then
       die "AUTOMATICALLY ROLLED BACK to $CURRENT. The update did not apply."
     fi
   fi

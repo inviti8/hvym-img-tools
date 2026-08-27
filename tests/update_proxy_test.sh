@@ -25,13 +25,30 @@ case "$1" in
     [ -f /tmp/pull_fails ] && exit 1
     exit 0 ;;
   inspect)
-    [ -f "$RUNNING_F" ] && cat "$RUNNING_F" && exit 0
-    exit 1 ;;
+    case "$*" in
+      *"{{.Image}}"*)
+        # digest is derived from the image the container was STARTED with,
+        # recorded at run time -- a moving tag cannot change it afterwards
+        [ -f /tmp/running_digest ] && cat /tmp/running_digest && exit 0
+        exit 1 ;;
+      *"image inspect"*) exit 0 ;;
+      *)
+        [ -f "$RUNNING_F" ] && cat "$RUNNING_F" && exit 0
+        exit 1 ;;
+    esac ;;
+  image) exit 0 ;;
   rm) rm -f "$RUNNING_F"; exit 0 ;;
   run)
     img="${@: -1}"
     if [ -f /tmp/start_fails ] && [ "$img" != "$(cat /tmp/prev_ok 2>/dev/null)" ]; then exit 1; fi
-    echo "$img" > "$RUNNING_F"; exit 0 ;;
+    echo "$img" > "$RUNNING_F"
+    # :latest resolves to whatever RESOLVE says right now; a pinned tag is itself
+    case "$img" in
+      *:latest) cat /tmp/latest_resolves_to 2>/dev/null > /tmp/running_digest || echo "sha256:unknown" > /tmp/running_digest ;;
+      sha256:*) echo "$img" > /tmp/running_digest ;;
+      *) echo "sha256:$(printf '%s' "$img" | tr -c 'a-z0-9' '_')" > /tmp/running_digest ;;
+    esac
+    exit 0 ;;
   ps) [ -f "$RUNNING_F" ] && echo "hvym-img-proxy Up 1s" ; exit 0 ;;
   stats) echo "  mem 74MiB / 4GiB  cpu 0.3%" ; exit 0 ;;
   logs) echo "(container logs)"; exit 0 ;;
@@ -95,7 +112,7 @@ out=$(bash /work/update_proxy.sh 0.1.4 2>&1)
 rm -f /tmp/unhealthy
 check "detected unhealthy"      "never became healthy" "$out"
 check "rolled back"             "AUTOMATICALLY ROLLED BACK" "$out"
-check "restored old image"      "0.1.3" "$(cat /tmp/running_image)"
+check "restored old image (by digest)" "0_1_3" "$(cat /tmp/running_image)"
 
 echo
 echo "=========== TEST 6: 401 check failing rolls back ==========="
@@ -128,6 +145,24 @@ mv /etc/hvym-img-tools/proxy.env /tmp/env.bak
 out=$(bash /work/update_proxy.sh 0.1.2 2>&1)
 mv /tmp/env.bak /etc/hvym-img-tools/proxy.env
 check "needs install first"     "run install_proxy.sh first" "$out"
+
+echo
+echo "=========== TEST 11: :latest rollback goes back to the OLD build ==========="
+# This is the trap the digest exists for: deploy :latest, let :latest move to a
+# new build, then roll back. Recording the TAG would restart the new image and
+# report success. Recording the digest goes back to what was actually running.
+rm -f /etc/hvym-img-tools/previous-image
+echo "sha256:aaaa_the_old_build" > /tmp/latest_resolves_to
+out=$(bash /work/update_proxy.sh latest 2>&1)
+check "warned about the moving tag" "moving tag" "$out"
+old_digest=$(cat /tmp/running_digest)
+check "running the old build"       "sha256:aaaa_the_old_build" "$old_digest"
+
+echo "sha256:bbbb_the_new_build" > /tmp/latest_resolves_to   # :latest moves
+out=$(bash /work/update_proxy.sh 0.2.0 2>&1)                 # upgrade away from it
+out=$(bash /work/update_proxy.sh --rollback 2>&1)
+check "rolled back by digest"       "resolved to sha256:aaaa_the_old_build" "$out"
+check "restored the OLD build"      "sha256:aaaa_the_old_build" "$(cat /tmp/running_digest)"
 
 echo
 echo "=========== RESULT ==========="
