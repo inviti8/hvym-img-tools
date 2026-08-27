@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ...core.imageio import DEFAULT_TEXTURE_SIZE
 from ...core.tool import Context, FileBytes, MediaResponse, Tool
 from . import reconstruct as backbones
 from .pipeline import ISNET_MODEL_KEY, load_isnet, run_pipeline
@@ -32,12 +33,25 @@ class ReangleInput(BaseModel):
         default="triposr",
         description="Reconstruction backbone. TripoSR (MIT) is the shippable default.",
     )
+    texture_size: int = Field(
+        default=DEFAULT_TEXTURE_SIZE,
+        ge=256,
+        le=4096,
+        description=(
+            "Baked texture resolution. 512 visibly softens the artist's linework once "
+            "the mesh is magnified in-app; drawings are typically ~2K, so 2048 is at or "
+            "below source rather than an upscale. Cheap -- linework compresses well. "
+            "Note the silhouette edge does not sharpen past isnet's own 1024 input."
+        ),
+    )
 
 
 class ReangleTool(Tool):
     name = "reangle"
     summary = "Style-preserving camera reangle: drawing → textured .glb 3D proxy"
-    version = "0.1.0"
+    # 0.2.0: texture defaults to 2048 (was 512). Bumped because the version is
+    # part of the cache key -- old 512 results must not be served for new requests.
+    version = "0.2.0"
 
     InputModel = ReangleInput
     OutputModel = MediaResponse  # binary .glb
@@ -59,6 +73,7 @@ class ReangleTool(Tool):
             isnet_session=ctx.models.get(ISNET_MODEL_KEY),
             backbone=backbone,
             mc_resolution=req.mc_resolution,
+            texture_size=req.texture_size,
         )
         return MediaResponse(
             data=result.glb,

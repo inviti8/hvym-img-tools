@@ -14,10 +14,26 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-#: prep_input.py constants. Changing these invalidates the UV alignment that
-#: docs/BENCHMARK.md §2 measures at 0.776 silhouette IoU — do not drift.
+#: prep_input.py constants. **DEFAULT_MARGIN** is what the UV alignment depends
+#: on — `isnet_matte` pads by it and `fit_to_frame` mirrors that padding, so
+#: drifting it invalidates the 0.776 silhouette IoU in docs/BENCHMARK.md §2.
+#:
+#: DEFAULT_SIZE is only the frame `fit_to_frame` maps into, and the result is
+#: divided by `size - 1` to give normalised UVs — so it cancels out. It is safe
+#: to raise the *texture* resolution without touching alignment; verified to
+#: 2.2e-16 across 512-4096.
 DEFAULT_SIZE = 512
 DEFAULT_MARGIN = 0.08
+
+#: Texture resolution for a baked result. 512 visibly softened the artist's
+#: linework once it was magnified in Inkternity; the drawings are ~2K to begin
+#: with, so this is at or below source resolution rather than an upscale. The
+#: cost is small because linework compresses well — measured 342-634 KB of PNG
+#: at 2048, against a ~680 KB mesh that already dominates the .glb.
+#:
+#: Note the *silhouette edge* does not sharpen past isnet's own 1024 input; what
+#: this recovers is the interior linework, which comes from the source image.
+DEFAULT_TEXTURE_SIZE = 2048
 ALPHA_LO, ALPHA_HI = 0.30, 0.65
 ALPHA_FLOOR = 12
 

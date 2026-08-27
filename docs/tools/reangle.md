@@ -22,6 +22,7 @@ POST /tools/reangle        multipart/form-data
 | `image` | file | *required* | Character drawing, any size or background |
 | `mc_resolution` | int (64–512) | `256` | Marching-cubes grid — the main cost lever |
 | `backbone` | str | `triposr` | Reconstruction backbone |
+| `texture_size` | int (256–4096) | `2048` | Baked texture resolution — see below |
 
 Returns `model/gltf-binary` (`char.glb`). Responses carry `X-Cache: HIT|MISS` and
 `X-Tool-Version`. Results are cached by `sha256(image + params)`, so re-requesting the same
@@ -37,6 +38,26 @@ curl -X POST http://localhost:8000/tools/reangle \
 
 uv run hvym-img reangle --in drawing.png --out char.glb   # same thing, locally
 ```
+
+### Texture resolution
+
+Defaults to **2048** (it was 512). At 512 the artist's linework visibly softened
+once the mesh was magnified in-app — individual hair strands and eye detail
+turned to mush. Source drawings are typically ~2K, so 2048 is at or below the
+original rather than an upscale.
+
+It is cheap: linework compresses well, measuring 342–634 KB of PNG at 2048
+against a ~680 KB mesh that already dominates the `.glb`.
+
+Two things worth knowing:
+
+- **The silhouette edge does not sharpen past ~1024.** The alpha comes from
+  isnet, whose own input is 1024², so raising this recovers *interior* linework
+  from the source image, not a crisper outline.
+- **Alignment is unaffected.** `fit_to_frame`'s output is divided by `size - 1`
+  to give normalised UVs, so the frame size cancels — verified identical to
+  2.2e-16 across 512–4096. Only `DEFAULT_MARGIN` moves the projection, and it is
+  unchanged, so BENCHMARK.md §2's 0.776 silhouette IoU still holds.
 
 ## Pipeline
 

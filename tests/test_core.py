@@ -184,3 +184,32 @@ def test_fit_is_centred_and_in_frame():
 def test_config_from_env_is_cpu_safe(monkeypatch):
     monkeypatch.setenv("HVYM_DEVICE", "cpu")
     assert Config.from_env().resolve_device() == "cpu"
+
+
+def test_texture_size_does_not_move_the_uv_alignment():
+    """Raising texture resolution must not disturb the projection.
+
+    `fit_to_frame`'s result is divided by `size - 1` to give normalised UVs, so
+    the frame size cancels out and only DEFAULT_MARGIN controls alignment. That
+    is what makes it safe to raise the texture from 512 to 2048 without
+    re-earning the 0.776 silhouette IoU in BENCHMARK.md §2.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    pts = rng.normal(size=(256, 2))
+    ref = fit_to_frame(pts, size=512) / 511
+    for size in (1024, 2048, 4096):
+        uv = fit_to_frame(pts, size=size) / (size - 1)
+        assert np.abs(uv - ref).max() < 1e-12, f"UVs drifted at size={size}"
+
+
+def test_margin_does_move_the_alignment():
+    """The guard above is only meaningful if the metric can detect a real drift."""
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    pts = rng.normal(size=(256, 2))
+    a = fit_to_frame(pts, size=512, margin=0.08) / 511
+    b = fit_to_frame(pts, size=512, margin=0.12) / 511
+    assert np.abs(a - b).max() > 1e-3

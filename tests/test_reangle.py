@@ -109,3 +109,26 @@ def test_tool_contract_is_registered():
     assert tool_cls.file_fields() == ("image",)
     assert tool_cls.returns_media() is True
     assert set(tool_cls().models_needed()) == {"isnet", "triposr"}
+
+
+def test_texture_size_is_exposed_and_defaults_to_2048():
+    """512 softened the linework once magnified in-app; the default is the fix."""
+    from hvym_img_tools.core.imageio import DEFAULT_TEXTURE_SIZE
+    from hvym_img_tools.tools.reangle.tool import ReangleInput, ReangleTool
+
+    field = ReangleInput.model_fields["texture_size"]
+    assert field.default == DEFAULT_TEXTURE_SIZE == 2048
+    assert ReangleInput(image=b"x").texture_size == 2048
+
+    # The version is part of the cache key, so a texture change must bump it or
+    # cached 512-pixel results would be served for requests that now want 2048.
+    assert ReangleTool.version != "0.1.0"
+
+
+def test_texture_size_changes_the_cache_key():
+    from hvym_img_tools.tools.reangle.tool import ReangleInput, ReangleTool
+
+    tool = ReangleTool()
+    a = tool.cache_key_parts(ReangleInput(image=b"same", texture_size=512))
+    b = tool.cache_key_parts(ReangleInput(image=b"same", texture_size=2048))
+    assert a != b, "different texture sizes must not share a cached result"

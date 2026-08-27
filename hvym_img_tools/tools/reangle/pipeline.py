@@ -11,7 +11,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from PIL import Image
 
-from ...core.imageio import composite_on, decode_image, isnet_matte
+from ...core.imageio import (
+    DEFAULT_TEXTURE_SIZE,
+    composite_on,
+    decode_image,
+    isnet_matte,
+)
 from . import reconstruct as backbones
 from .uvbake import bake_glb, detect_front_view, front_planar_uv
 
@@ -38,6 +43,7 @@ def run_pipeline(
     isnet_session,
     backbone: backbones.Backbone,
     mc_resolution: int = backbones.MC_RESOLUTION_DEFAULT,
+    texture_size: int = DEFAULT_TEXTURE_SIZE,
 ) -> ReangleResult:
     """One drawing in, one textured `.glb` out.
 
@@ -58,7 +64,7 @@ def run_pipeline(
         return _T()
 
     with _timed("matte"):
-        matte = isnet_matte(decode_image(image_bytes, "RGB"), isnet_session)
+        matte = isnet_matte(decode_image(image_bytes, "RGB"), isnet_session, size=texture_size)
 
     with _timed("reconstruct"):
         mesh = backbone.reconstruct(composite_on(matte.image), mc_resolution=mc_resolution)
