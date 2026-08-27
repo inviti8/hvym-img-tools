@@ -11,9 +11,16 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, Protocol
+from typing import Any
 
 from PIL import Image
+
+from ...backbones import (  # noqa: F401 - re-exported for callers
+    Backbone,
+    backbone_names,
+    get_backbone,
+    register_backbone,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,31 +33,10 @@ TRIPOSR_MODEL_KEY = "triposr"
 MC_RESOLUTION_DEFAULT = 256
 
 
-class Backbone(Protocol):
-    """What a reconstruction backbone must provide."""
-
-    def reconstruct(self, image: Image.Image, *, mc_resolution: int) -> Any:
-        """RGB image (character on grey) → a trimesh.Trimesh."""
-
-
-_BACKBONES: dict[str, Callable[[Any], Backbone]] = {}
-
-
-def register_backbone(name: str, factory: Callable[[Any], Backbone]) -> None:
-    _BACKBONES[name] = factory
-
-
-def get_backbone(name: str, model: Any) -> Backbone:
-    try:
-        return _BACKBONES[name](model)
-    except KeyError:
-        raise KeyError(
-            f"unknown backbone {name!r}; available: {sorted(_BACKBONES)}"
-        ) from None
-
-
-def backbone_names() -> list[str]:
-    return sorted(_BACKBONES)
+# The registry moved to `hvym_img_tools.backbones` once `mesh` needed the same
+# models -- a tool must not import another tool. Re-exported here so this
+# module's callers are unchanged, and so TripoSR and TRELLIS share one registry
+# for the swap `ReangleInput.backbone` already anticipates.
 
 
 # --------------------------------------------------------------------------- #

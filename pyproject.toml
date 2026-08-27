@@ -8,6 +8,10 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=10.1",
     "trimesh>=4.0",
+    # trimesh 5 delegates simplify_quadric_decimation to this; the `mesh` tool
+    # must decimate (raw backbone output is up to 1.2M faces / 20.8 MB), and it
+    # is CPU-only, so it belongs in the base install rather than the gpu extra.
+    "fast-simplification>=0.1.7",
     "pydantic>=2.6",
 ]
 
