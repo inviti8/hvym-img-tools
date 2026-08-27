@@ -16,7 +16,7 @@
 # Actions:  (default) install/upgrade   --status   --uninstall   --print-proxy-conf
 set -euo pipefail
 
-IMAGE="ghcr.io/inviti8/hvym-img-proxy:0.1.0"
+IMAGE="ghcr.io/inviti8/hvym-img-proxy:${HVYM_IMAGE_TAG:-0.1.2}"
 NAME="hvym-img-proxy"
 PORT="${HVYM_BIND_PORT:-8080}"
 BIND="${HVYM_BIND_ADDR:-127.0.0.1}"

@@ -134,6 +134,26 @@ Other properties worth knowing:
 docker run -d --restart=unless-stopped -p 127.0.0.1:8080:8080   --memory=512m --memory-reservation=256m --cpus=0.5   -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)"   -e RUNPOD_API_KEY=...      `# never leaves the server`   -e RUNPOD_ENDPOINT_ID=...    -e HVYM_MAX_UPLOAD_MB=8 -e HVYM_PROXY_TIMEOUT=600   ghcr.io/inviti8/hvym-img-proxy:0.1.0
 ```
 
+### Updating
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inviti8/hvym-img-tools/main/scripts/update_proxy.sh -o update_proxy.sh
+sudo bash update_proxy.sh              # to the pinned default tag
+sudo bash update_proxy.sh 0.1.2        # or a specific one
+sudo bash update_proxy.sh --status
+sudo bash update_proxy.sh --rollback
+```
+
+Configuration in `/etc/hvym-img-tools/proxy.env` is reused untouched, so keys and
+the endpoint id survive an update and are never re-prompted. nginx is not touched
+either — same container name, same `127.0.0.1:8080`.
+
+The ordering is the safety: the new image is **pulled before anything is
+stopped**, so a failed or slow pull cannot leave the box with no proxy. After the
+swap the new container must answer `/healthz`, report `auth: true`, **and** reject
+an unauthenticated request; if any of those fail it puts the previous image back
+by itself. `tests/update_proxy_test.sh` exercises all of that, rollbacks included.
+
 ### Measured footprint
 
 `ghcr.io/inviti8/hvym-img-proxy:0.1.0`, real image, real uploads:
