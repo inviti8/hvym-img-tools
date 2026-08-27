@@ -84,10 +84,25 @@ def create_app() -> FastAPI:
         )
 
     runpod_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+    # Tools live on separate serverless endpoints (docs/tools/mesh.md §5), so a
+    # single RUNPOD_ENDPOINT_ID is no longer enough. It stays as the default, and
+    # RUNPOD_ENDPOINT_ID_<TOOL> overrides per tool -- so an existing deployment
+    # keeps working unchanged and only gains routing when it sets the extras.
     endpoint_id = os.environ.get("RUNPOD_ENDPOINT_ID", "").strip()
-    if not runpod_key or not endpoint_id:
+    tool_endpoints = {
+        key[len("RUNPOD_ENDPOINT_ID_"):].lower(): value.strip()
+        for key, value in os.environ.items()
+        if key.startswith("RUNPOD_ENDPOINT_ID_") and value.strip()
+    }
+
+    def endpoint_for(tool: str) -> str:
+        return tool_endpoints.get(tool.lower(), endpoint_id)
+
+    if not runpod_key or not (endpoint_id or tool_endpoints):
         # Fail loudly at startup rather than 500 on the first real request.
-        log.error("RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID must both be set")
+        log.error("RUNPOD_API_KEY and at least one RUNPOD_ENDPOINT_ID must be set")
+    if tool_endpoints:
+        log.info("per-tool endpoints: %s", sorted(tool_endpoints))
 
     guard = [Depends(_auth_dependency(auth))]
 
@@ -95,12 +110,25 @@ def create_app() -> FastAPI:
     # can be torn down from a lifespan handler: if this process dies the pings
     # stop and the worker sleeps on its own, which is the whole reason a lease
     # beats a workersMin switch here.
-    pool = WarmPool(runpod_key, endpoint_id)
+    # A lease should warm the endpoint the artist is about to use, not every
+    # endpoint we have (docs/WARMING.md): warm time is the metered unit, so
+    # warming both would double the bill for no benefit. One pool per endpoint,
+    # created on demand.
+    pools: dict[str, WarmPool] = {}
+
+    def pool_for(tool: str) -> WarmPool:
+        target = endpoint_for(tool)
+        if target not in pools:
+            pools[target] = WarmPool(runpod_key, target)
+        return pools[target]
+
+    pool = pool_for("reangle")          # default endpoint's pool
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
-        await pool.shutdown()
+        for p in list(pools.values()):
+            await p.shutdown()
 
     app = FastAPI(title="hvym-img-tools proxy", version="0.1.0", lifespan=lifespan)
     app.state.warm_pool = pool
@@ -113,8 +141,9 @@ def create_app() -> FastAPI:
             "status": "ok",
             "mode": "proxy",
             "auth": auth.enabled,
-            "runpod_configured": bool(runpod_key and endpoint_id),
+            "runpod_configured": bool(runpod_key and (endpoint_id or tool_endpoints)),
             "endpoint_id": endpoint_id or None,
+            "tool_endpoints": sorted(tool_endpoints) or None,
         }
 
     # ---------------------------------------------------------------- warming
@@ -126,41 +155,43 @@ def create_app() -> FastAPI:
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - empty or non-JSON body is fine here
-            return None, ""
+            return None, "", "reangle"
         if not isinstance(body, dict):
-            return None, ""
+            return None, "", "reangle"
         lease_id = body.get("lease_id")
         label = body.get("label") or body.get("client") or ""
-        return (str(lease_id) if lease_id else None), str(label)[:64]
+        tool = body.get("tool") or "reangle"
+        return (str(lease_id) if lease_id else None), str(label)[:64], str(tool)[:32]
 
     @app.post("/warm", dependencies=guard, tags=["warm"])
     async def warm_acquire(request: Request) -> dict:
         if not runpod_key or not endpoint_id:
             raise HTTPException(status_code=503, detail="proxy is not configured")
-        lease_id, label = await _lease_id_from(request)
-        return await pool.acquire(lease_id, label)
+        lease_id, label, tool = await _lease_id_from(request)
+        return await pool_for(tool).acquire(lease_id, label)
 
     @app.get("/warm", tags=["warm"])
-    async def warm_status() -> dict:
+    async def warm_status(tool: str = "reangle") -> dict:
         # Unauthenticated on purpose: it is a read-only indicator that spends
         # nothing, and the UI wants it before the artist has a lease. It reports
         # no key, no endpoint URL, and cannot start a worker.
         if not runpod_key or not endpoint_id:
             raise HTTPException(status_code=503, detail="proxy is not configured")
-        return await pool.status()
+        return await pool_for(tool).status()
 
     @app.delete("/warm", dependencies=guard, tags=["warm"])
     async def warm_release(request: Request) -> dict:
         if not runpod_key or not endpoint_id:
             raise HTTPException(status_code=503, detail="proxy is not configured")
-        lease_id, _ = await _lease_id_from(request)
+        lease_id, _, tool = await _lease_id_from(request)
         if not lease_id:
             raise HTTPException(status_code=422, detail="lease_id is required to release")
-        return await pool.release(lease_id)
+        return await pool_for(tool).release(lease_id)
 
     @app.post("/tools/{name}", dependencies=guard, response_class=Response)
     async def call_tool(name: str, request: Request) -> Response:
-        if not runpod_key or not endpoint_id:
+        target = endpoint_for(name)
+        if not runpod_key or not target:
             raise HTTPException(status_code=503, detail="proxy is not configured")
 
         form = await request.form()
@@ -184,7 +215,8 @@ def create_app() -> FastAPI:
         # Telling the warm pool suppresses its keepalive for the duration: firing
         # one alongside this request is pure contention, and was measured letting
         # RunPod dispatch the request to a second, cold worker.
-        pool.request_started()
+        warm = pool_for(name)
+        warm.request_started()
 
         def _check(resp: httpx.Response) -> dict:
             if resp.status_code >= 400:
@@ -196,7 +228,7 @@ def create_app() -> FastAPI:
             # One client for the whole job so polling reuses the connection.
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
                 body = _check(await client.post(
-                    f"{RUNPOD_BASE}/{endpoint_id}/runsync",
+                    f"{RUNPOD_BASE}/{target}/runsync",
                     headers=auth_header,
                     json={"input": payload},
                 ))
@@ -215,7 +247,7 @@ def create_app() -> FastAPI:
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, POLL_MAX)
                     body = _check(await client.get(
-                        f"{RUNPOD_BASE}/{endpoint_id}/status/{job_id}", headers=auth_header
+                        f"{RUNPOD_BASE}/{target}/status/{job_id}", headers=auth_header
                     ))
                     status = body.get("status")
         except HTTPException:
@@ -226,7 +258,7 @@ def create_app() -> FastAPI:
             # Deliberately does not echo the upstream URL or key material.
             raise HTTPException(status_code=502, detail=f"upstream error: {type(exc).__name__}") from exc
         finally:
-            pool.request_finished()
+            warm.request_finished()
 
         if status not in (None, "COMPLETED"):
             detail = body.get("error") or f"job status {status}"
@@ -244,6 +276,10 @@ def create_app() -> FastAPI:
         }
         if output.get("tool_version"):
             headers["X-Tool-Version"] = str(output["tool_version"])
+        if output.get("cache_key"):
+            # sha256(image + params) -- already a content address, so it is a
+            # natural asset id for a client-side library (docs/tools/mesh.md §6).
+            headers["X-Cache-Key"] = str(output["cache_key"])
 
         if "json" in output:
             import json as _json

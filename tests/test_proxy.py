@@ -724,3 +724,55 @@ def test_a_busy_worker_still_counts_as_warm(monkeypatch):
         await pool.shutdown()
 
     asyncio.run(scenario())
+
+
+# --- per-tool endpoint routing ---------------------------------------------
+# Tools live on separate serverless endpoints (docs/tools/mesh.md §5), so the
+# proxy has to route by tool while staying backward compatible with a
+# deployment that only sets a single RUNPOD_ENDPOINT_ID.
+
+def test_routes_each_tool_to_its_own_endpoint(env, monkeypatch):
+    monkeypatch.setenv("RUNPOD_ENDPOINT_ID_MESH", "mesh-ep")
+    up = FakeUpstream().install(monkeypatch)
+    client = _client()
+
+    client.post("/tools/mesh", files={"image": ("a.png", b"x", "image/png")},
+                headers={"X-API-Key": GOOD})
+    assert up.seen["url"].endswith("/mesh-ep/runsync")
+
+    client.post("/tools/reangle", files={"image": ("a.png", b"x", "image/png")},
+                headers={"X-API-Key": GOOD})
+    assert up.seen["url"].endswith("/ep123/runsync"), "reangle must keep the default"
+
+
+def test_a_single_endpoint_still_works(env, monkeypatch):
+    """An existing deployment sets only RUNPOD_ENDPOINT_ID and must not break."""
+    up = FakeUpstream().install(monkeypatch)
+    _client().post("/tools/mesh", files={"image": ("a.png", b"x", "image/png")},
+                   headers={"X-API-Key": GOOD})
+    assert up.seen["url"].endswith("/ep123/runsync")
+
+
+def test_cache_key_is_surfaced_for_the_library(env, monkeypatch):
+    FakeUpstream(payload={
+        "status": "COMPLETED",
+        "output": {"data": base64.b64encode(GLB).decode(),
+                   "media_type": "model/gltf-binary", "cache_key": "abc123"},
+    }).install(monkeypatch)
+    resp = _client().post("/tools/mesh", files={"image": ("a.png", b"x", "image/png")},
+                          headers={"X-API-Key": GOOD})
+    assert resp.headers["x-cache-key"] == "abc123"
+
+
+def test_warm_targets_the_named_tool(env, monkeypatch):
+    """Warming both endpoints would double the bill for no benefit."""
+    monkeypatch.setenv("RUNPOD_ENDPOINT_ID_MESH", "mesh-ep")
+    FakeRunPod(ready=1).install(monkeypatch)
+    app = proxy_mod.create_app()
+    client = TestClient(app)
+
+    client.post("/warm", headers={"X-API-Key": GOOD}, json={"lease_id": "a", "tool": "mesh"})
+    client.post("/warm", headers={"X-API-Key": GOOD}, json={"lease_id": "b", "tool": "reangle"})
+
+    body = client.get("/warm", params={"tool": "mesh"}).json()
+    assert body["active_leases"] == 1, "the mesh lease must not count reangle's"

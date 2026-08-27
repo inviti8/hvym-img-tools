@@ -58,6 +58,41 @@ jobs:
           cache-from: type=gha,scope=proxy
           cache-to: type=gha,mode=max,scope=proxy
 
+  mesh:
+    # TRELLIS worker. Separate job so it builds in parallel with the reangle
+    # image rather than serialising two multi-GB builds.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Reclaim disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android                       /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: |
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.mesh
+          push: ${{ inputs.push != false }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-mesh:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/hvym-img-mesh:latest
+          cache-from: type=gha,scope=mesh
+
   gpu:
     runs-on: ubuntu-latest
     permissions:

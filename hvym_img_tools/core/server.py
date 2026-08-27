@@ -67,6 +67,9 @@ def _build_endpoint(tool: Tool, ctx: Context):
             if cache_key:
                 ctx.cache.put(cache_key, result.data, result.media_type)
             headers = {"X-Cache": "MISS", "X-Tool-Version": tool.version}
+            if cache_key:
+                # Content address -- a natural asset id for a client library.
+                headers["X-Cache-Key"] = cache_key
             if result.filename:
                 headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
             return Response(content=result.data, media_type=result.media_type, headers=headers)
@@ -94,7 +97,11 @@ def _build_endpoint(tool: Tool, ctx: Context):
             return Response(
                 content=hit.read(),
                 media_type=hit.media_type,
-                headers={"X-Cache": "HIT", "X-Tool-Version": tool.version},
+                headers={
+                    "X-Cache": "HIT",
+                    "X-Tool-Version": tool.version,
+                    "X-Cache-Key": cache_key,
+                },
             )
 
         started = time.perf_counter()

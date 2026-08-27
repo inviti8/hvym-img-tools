@@ -1,0 +1,124 @@
+# hvym-img-tools `mesh` worker -- sketch to an untextured 3D reference.
+#
+# Separate from the reangle image on purpose (docs/tools/mesh.md §5): folding
+# TRELLIS in would lengthen an already ~260s cold start for every reangle
+# request, to serve a tool most requests never call.
+#
+# **Torch is pinned to 2.4.1+cu124, deliberately older than the reangle image's
+# 2.8/cu128.** kaolin, xformers and spconv all ship wheels per (torch, CUDA)
+# pair, and 2.4.1+cu124 is the combination the TRELLIS evaluation actually
+# verified end to end. Moving it is a re-validation, not a version bump.
+#
+# No compile stage: every dependency here has a prebuilt wheel, and nvdiffrast
+# -- the one thing that would need nvcc -- is NOT required, because it is only
+# used for rendering and we only extract meshes.
+#
+# Licensing: MIT end to end. TRELLIS is MIT for code and weights; there is no
+# Stable Diffusion here, which is the whole reason this tool is untextured
+# (docs/tools/hallucinate.md records that decision).
+FROM python:3.11-slim-bookworm AS runtime
+
+ARG TORCH_VERSION=2.4.1
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu124
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/models/hf \
+    TORCH_HOME=/opt/models/torch \
+    TRELLIS_PATH=/opt/TRELLIS \
+    HVYM_CACHE_DIR=/cache \
+    HVYM_WORKSPACE_DIR=/tmp/hvym \
+    HVYM_MODELS_DIR=/opt/models \
+    PYTHONPATH=/app \
+    ATTN_BACKEND=xformers \
+    SPCONV_ALGO=native
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# `blinker` is distutils-installed in some bases and blocks any pip that tries
+# to replace it. Cheap to pre-empt; expensive to debug.
+RUN pip install --upgrade pip && pip install --ignore-installed blinker
+
+RUN pip install "torch==${TORCH_VERSION}" torchvision --index-url ${TORCH_INDEX}
+
+# --- TRELLIS's dependencies ------------------------------------------------
+# Its own setup.sh fails SILENTLY on several of these, which is why they are
+# installed explicitly and asserted below (docs/tools/mesh.md §4).
+#
+# numpy<2 is load-bearing: kaolin's cython extensions are built against the
+# numpy 1 ABI and raise "numpy.dtype size changed" at import under numpy 2.
+RUN pip install "numpy<2" \
+    && pip install kaolin==0.17.0 \
+        -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.4.0_cu124.html \
+    && pip install "xformers==0.0.28.post1" --index-url ${TORCH_INDEX} \
+    && pip install spconv-cu124 utils3d \
+    && pip install \
+        "transformers>=4.36,<5" "huggingface_hub" safetensors accelerate \
+        einops omegaconf trimesh xatlas "fast-simplification>=0.1.7" \
+        imageio "imageio[ffmpeg]" opencv-python-headless scipy \
+        fastapi "uvicorn[standard]" python-multipart pydantic httpx \
+        runpod
+
+# --- TRELLIS source --------------------------------------------------------
+ARG TRELLIS_REF=main
+RUN git clone --depth 1 --branch ${TRELLIS_REF} \
+        https://github.com/microsoft/TRELLIS.git ${TRELLIS_PATH} \
+    && rm -rf ${TRELLIS_PATH}/.git
+
+# --- weights, baked in for a fast cold start -------------------------------
+# TRELLIS also pulls DINOv2 through torch.hub at first use; baking it here stops
+# a cold worker downloading it before serving its first job.
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+p = snapshot_download('microsoft/TRELLIS-image-large'); \
+print('ok: TRELLIS weights ->', p)"
+
+RUN python -c "\
+import torch; \
+torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', pretrained=True); \
+print('ok: DINOv2 cached')" || echo "WARN: DINOv2 not pre-cached; first job will fetch it"
+
+# --- app -------------------------------------------------------------------
+WORKDIR /app
+COPY hvym_img_tools /app/hvym_img_tools
+COPY pyproject.toml README.md /app/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /cache /tmp/hvym
+
+# --- build-time assertions -------------------------------------------------
+# Fail the build rather than ship an image that 502s on a worker. Each of these
+# corresponds to a failure actually hit during evaluation.
+RUN python -c "\
+import numpy; \
+assert numpy.__version__.startswith('1.'), 'numpy must be <2 for kaolin: %s' % numpy.__version__; \
+import kaolin; \
+import spconv.pytorch; \
+import xformers.ops as xops; \
+assert hasattr(xops.fmha, 'attn_bias'), 'xformers layout changed'; \
+print('ok: numpy', numpy.__version__, '| kaolin', kaolin.__version__, '| spconv, xformers')"
+
+RUN python -c "\
+import sys, os; sys.path.insert(0, os.environ['TRELLIS_PATH']); \
+from hvym_img_tools.backbones.trellis import _apply_compat_shims; _apply_compat_shims(); \
+import xformers.ops as xops; \
+assert hasattr(xops.fmha, 'BlockDiagonalMask'), 'compat shim did not take'; \
+from trellis.pipelines import TrellisImageTo3DPipeline; \
+print('ok: TRELLIS imports')"
+
+RUN python -c "\
+from hvym_img_tools.core import registry; registry.discover(); \
+names = registry.names(); \
+assert 'mesh' in names, names; \
+print('ok: tools registered ->', names)"
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["serverless"]
+
+# Last so it never invalidates the expensive layers above.
+LABEL org.opencontainers.image.source="https://github.com/inviti8/hvym-img-tools" \
+      org.opencontainers.image.description="hvym-img-tools mesh worker (TRELLIS) - sketch to untextured 3D reference" \
+      org.opencontainers.image.licenses="MIT"
