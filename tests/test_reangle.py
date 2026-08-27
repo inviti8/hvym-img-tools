@@ -132,3 +132,34 @@ def test_texture_size_changes_the_cache_key():
     a = tool.cache_key_parts(ReangleInput(image=b"same", texture_size=512))
     b = tool.cache_key_parts(ReangleInput(image=b"same", texture_size=2048))
     assert a != b, "different texture sizes must not share a cached result"
+
+
+def test_front_detection_accepts_any_matte_resolution(slab):
+    """Regression: raising texture_size to 2048 broke the live worker.
+
+    `detect_front_view` splats the mesh at `size` (512) and compares it against
+    the matte's alpha. Once the matte was baked at 2048 the two no longer had
+    the same shape:
+
+        ValueError: operands could not be broadcast together
+                    with shapes (512,512) (2048,2048)
+
+    Every unit test passed because they all handed it a 512 alpha. The fix
+    normalises the alpha, so this checks a range of sizes AND that the detected
+    axis does not change with resolution.
+    """
+    import numpy as np
+
+    from hvym_img_tools.tools.reangle.uvbake import detect_front_view
+
+    verts, faces = slab
+    ref = None
+    for size in (256, 512, 1024, 2048):
+        alpha = np.zeros((size, size), np.uint8)
+        lo, hi = int(size * 0.2), int(size * 0.8)
+        alpha[lo:hi, lo:hi] = 255
+        view = detect_front_view(verts, alpha, faces)
+        axes = (view.h_axis, view.v_axis, view.d_axis)
+        if ref is None:
+            ref = axes
+        assert axes == ref, f"front axis changed at matte size {size}"

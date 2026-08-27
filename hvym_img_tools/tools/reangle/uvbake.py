@@ -92,6 +92,15 @@ def detect_front_view(
     front instead of inheriting a hard-coded convention. Pass `faces` so coarse
     meshes are densified before scoring.
     """
+    # The matte may be baked at any texture resolution (2048 by default), but
+    # front detection is a coarse silhouette-overlap score that gains nothing
+    # from it -- and splatting at 2048 would be 16x the work. Match the mask's
+    # own size so the two are comparable, and so this keeps producing exactly
+    # the scores BENCHMARK.md measured at 512.
+    if alpha.shape[:2] != (size, size):
+        alpha = np.asarray(
+            Image.fromarray(alpha).resize((size, size), Image.BILINEAR)
+        )
     silhouette = alpha > 12
     vertices = _densify(vertices, faces, MIN_SPLAT_POINTS)
     best: FrontView | None = None

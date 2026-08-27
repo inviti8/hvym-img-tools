@@ -53,7 +53,8 @@ def encode_png(image: Image.Image) -> bytes:
 
 @dataclass(slots=True)
 class Matte:
-    """A matted character: 512² RGBA, alpha = silhouette."""
+    """A matted character: square RGBA at the requested texture size,
+    alpha = silhouette."""
 
     image: Image.Image
     bbox: tuple[int, int, int, int]
