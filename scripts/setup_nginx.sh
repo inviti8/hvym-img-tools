@@ -19,21 +19,24 @@
 # Options:
 #   --upstream-port N   proxy target on 127.0.0.1   (default 8080)
 #   --max-upload N      MB; must match HVYM_MAX_UPLOAD_MB (default 8)
-#   --read-timeout N    seconds; must exceed the cold start (default 300)
+#   --read-timeout N    seconds; must exceed the cold start (default 900)
 #   --email ADDR        passed to certbot for expiry notices
 #   --no-tls            create the vhost but skip certbot
 #   --force             overwrite an existing vhost file of the same name
 #   --rollback          remove the vhost this script created, and reload
+#   --retune            change only the timeout/upload limits on an existing
+#                       vhost, leaving its TLS block and everything else alone
 set -uo pipefail
 
 DOMAIN=""
 UPSTREAM_PORT=8080
 MAX_UPLOAD=8
-READ_TIMEOUT=300
+READ_TIMEOUT=900
 EMAIL=""
 DO_TLS=1
 FORCE=0
 ROLLBACK=0
+RETUNE=0
 
 GRN=$(printf '\033[32m'); YEL=$(printf '\033[33m'); RED=$(printf '\033[31m')
 DIM=$(printf '\033[2m');  OFF=$(printf '\033[0m')
@@ -51,6 +54,7 @@ while [ $# -gt 0 ]; do
     --no-tls)        DO_TLS=0;           shift ;;
     --force)         FORCE=1;            shift ;;
     --rollback)      ROLLBACK=1;         shift ;;
+    --retune)        RETUNE=1;           shift ;;
     -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
     -*)              die "unknown option: $1" ;;
     *)               DOMAIN="$1";        shift ;;
@@ -81,6 +85,19 @@ remove_vhost() {
   rm -f "$VHOST"
 }
 
+# Undo whatever this run did to the vhost. For a fresh install that means
+# deleting it; for --retune it means putting the previous file back, because
+# deleting a vhost the box is already serving would turn a bad timeout into an
+# outage -- and that file carries the TLS block certbot wrote.
+PREV_VHOST=""
+revert_vhost() {
+  if [ "$RETUNE" -eq 1 ] && [ -n "$PREV_VHOST" ] && [ -f "$PREV_VHOST" ]; then
+    cp -p "$PREV_VHOST" "$VHOST"
+  else
+    remove_vhost
+  fi
+}
+
 # ------------------------------------------------------------------- rollback
 if [ "$ROLLBACK" -eq 1 ]; then
   if [ ! -f "$VHOST" ]; then
@@ -109,7 +126,11 @@ Fix that first -- otherwise a rollback cannot restore a working state."
 fi
 ok "existing nginx config tests clean ($LAYOUT layout)"
 
-if [ -f "$VHOST" ] && [ "$FORCE" -eq 0 ]; then
+if [ "$RETUNE" -eq 1 ]; then
+  [ -f "$VHOST" ] || die "--retune needs an existing vhost at $VHOST -- run without it first"
+  grep -q "$MARKER" "$VHOST" || die "$VHOST was not created by this script -- refusing to edit it"
+  ok "retuning our own vhost at $VHOST"
+elif [ -f "$VHOST" ] && [ "$FORCE" -eq 0 ]; then
   if grep -q "$MARKER" "$VHOST"; then
     ok "re-running over our own vhost at $VHOST"
   else
@@ -128,6 +149,8 @@ else
 fi
 
 # DNS must already point here, or certbot's HTTP-01 challenge cannot succeed.
+# Irrelevant when retuning: no certificate is issued, so nothing depends on it.
+[ "$RETUNE" -eq 1 ] && DO_TLS=0
 resolved=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1)
 if [ -z "$resolved" ]; then
   if [ "$DO_TLS" -eq 1 ]; then
@@ -218,6 +241,19 @@ else
 fi
 
 # ------------------------------------------------------------- write the vhost
+if [ "$RETUNE" -eq 1 ]; then
+  step "Retuning $VHOST"
+  PREV_VHOST=$(mktemp); cp -p "$VHOST" "$PREV_VHOST"
+  # Touch only the three directives this script owns. A rewrite would drop the
+  # `listen 443` block, ssl_certificate lines and redirect that certbot added.
+  sed -i -E     -e "s|^([[:space:]]*)client_max_body_size[[:space:]]+[0-9]+m;|\1client_max_body_size ${MAX_UPLOAD}m;|"     -e "s|^([[:space:]]*)proxy_read_timeout[[:space:]]+[0-9]+s;|\1proxy_read_timeout ${READ_TIMEOUT}s;|"     -e "s|^([[:space:]]*)proxy_send_timeout[[:space:]]+[0-9]+s;|\1proxy_send_timeout ${READ_TIMEOUT}s;|"     "$VHOST"
+  if ! grep -q "proxy_read_timeout ${READ_TIMEOUT}s;" "$VHOST"; then
+    cp -p "$PREV_VHOST" "$VHOST"
+    die "could not find a proxy_read_timeout directive to change in $VHOST"
+  fi
+  ok "client_max_body_size ${MAX_UPLOAD}m, proxy_read/send_timeout ${READ_TIMEOUT}s"
+  grep -c 'ssl_certificate ' "$VHOST" >/dev/null 2>&1 &&     ok "TLS block left as certbot wrote it ($(grep -c 'ssl_certificate' "$VHOST") ssl lines intact)"
+else
 step "Writing $VHOST"
 umask 022
 cat > "$VHOST" <<EOF
@@ -238,8 +274,10 @@ server {
 
         # Both of these override nginx defaults that silently break this service:
         #   client_max_body_size defaults to 1m  -> every upload fails with 413
-        #   proxy_read_timeout   defaults to 60s -> kills every cold start,
-        #                                           which can run ~260s
+        #   proxy_read_timeout   defaults to 60s -> kills every cold start
+        # Measured cold starts: reangle ~260s, mesh ~542s (TRELLIS pulls a
+        # ~6.5GB image). 300s looked generous until mesh shipped and every cold
+        # request came back as a 504 HTML page after five minutes of waiting.
         client_max_body_size ${MAX_UPLOAD}m;
         proxy_read_timeout ${READ_TIMEOUT}s;
         proxy_send_timeout ${READ_TIMEOUT}s;
@@ -256,19 +294,20 @@ if [ "$LAYOUT" = "debian" ] && [ ! -e "$LINK" ]; then
   ln -s "$VHOST" "$LINK"
   ok "enabled via $LINK"
 fi
+fi
 
 # --------------------------------------------------------------- test + reload
 step "Testing config"
 if ! nginx -t >/dev/null 2>&1; then
   echo; nginx -t 2>&1 | sed 's/^/    /'
-  remove_vhost
+  revert_vhost
   die "config test FAILED -- rolled the new vhost back out, nginx was NOT reloaded.
 Your existing sites are untouched."
 fi
 ok "nginx -t passes"
 
 systemctl reload nginx 2>/dev/null || nginx -s reload || {
-  remove_vhost
+  revert_vhost
   die "reload failed -- rolled back"
 }
 ok "nginx reloaded"
@@ -281,7 +320,7 @@ sleep 2
 step "Confirming the other sites are unharmed"
 
 if ! assert_neighbours_untouched "after writing the vhost"; then
-  remove_vhost
+  revert_vhost
   nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || nginx -s reload; }
   die "rolled back. Restore the backup if anything looks wrong:
     sudo tar xzf $BACKUP -C /etc && sudo nginx -t && sudo systemctl reload nginx"
@@ -300,7 +339,7 @@ if [ -s "$SNAP" ]; then
   done < "$SNAP"
 
   if [ -n "$regressed" ]; then
-    remove_vhost
+    revert_vhost
     nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || nginx -s reload; }
     die "these sites regressed:$regressed
 Rolled the new vhost back out and reloaded. If they are still wrong, restore:

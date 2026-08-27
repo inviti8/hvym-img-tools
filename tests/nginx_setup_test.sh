@@ -94,7 +94,68 @@ out=$(bash /work/setup_nginx.sh authen.test --rollback 2>&1)
 check "refused foreign rollback"     "refusing to remove"     "$out"
 check "authen config still there"    "AUTHEN IS ALIVE"        "$(curl -s -m 5 http://authen.test/)"
 
+[ "$FAIL" -eq 0 ] || exit 1
+
+# --- --retune: change limits on a vhost certbot has since rewritten -----------
+# The live box hit a 504 because 300s was below the mesh cold start. Rewriting
+# the vhost to fix that would have discarded certbot's TLS block, so --retune
+# edits the three directives in place. These assertions are about what it must
+# NOT disturb.
 echo
-echo "=============== RESULT ==============="
+echo "=========== TEST: --retune ==========="
+
+# An earlier case may have rolled our vhost back out, so start from a known one.
+bash /work/setup_nginx.sh img.test --no-tls --force --upstream-port 18080 >/dev/null 2>&1
+
+# Simulate certbot: add an ssl server block and a redirect to OUR vhost.
+VH=/etc/nginx/sites-available/img.test
+cat >> "$VH" <<'SSL'
+server {
+    listen 443 ssl; # managed by Certbot
+    server_name img.test;
+    ssl_certificate /etc/letsencrypt/live/img.test/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/img.test/privkey.pem; # managed by Certbot
+    location / { proxy_pass http://127.0.0.1:18080; }
+}
+SSL
+before_ssl=$(grep -c 'managed by Certbot' "$VH")
+before_neighbour=$(curl -s -m 5 http://authen.test/ 2>/dev/null)
+
+# 443 has no cert here, so drop that block for `nginx -t` while keeping the
+# certbot markers we are asserting survive.
+sed -i 's/^    listen 443 ssl; # managed by Certbot/    listen 8443; # managed by Certbot/' "$VH"
+sed -i '/ssl_certificate/d' "$VH"
+before_markers=$(grep -c 'managed by Certbot' "$VH")
+
+out=$(bash /work/setup_nginx.sh img.test --retune --read-timeout 900 --max-upload 16 2>&1)
+check "retuned the timeout"   "proxy_read_timeout 900s;" "$(cat $VH)"
+check "retuned send timeout"  "proxy_send_timeout 900s;" "$(cat $VH)"
+check "retuned the upload"    "client_max_body_size 16m;" "$(cat $VH)"
+check "reported it"           "proxy_read/send_timeout 900s" "$out"
+after_markers=$(grep -c 'managed by Certbot' "$VH")
+[ "$after_markers" = "$before_markers" ] \
+  && { echo "  [PASS] certbot's block survived ($after_markers markers)"; PASS=$((PASS+1)); } \
+  || { echo "  [FAIL] certbot markers $before_markers -> $after_markers"; FAIL=$((FAIL+1)); }
+check "neighbour still alive"  "AUTHEN IS ALIVE" "$(curl -s -m 5 http://authen.test/ 2>/dev/null)"
+if printf '%s' "$out" | grep -q "==> TLS"; then
+  echo "  [FAIL] --retune entered the TLS step; it must never touch certificates"; FAIL=$((FAIL+1))
+else echo "  [PASS] never entered the TLS step"; PASS=$((PASS+1)); fi
+
+echo
+echo "=========== TEST: --retune refuses a foreign vhost ==========="
+cat > /etc/nginx/sites-available/authen.test.bak2 <<'X'
+server { listen 80; server_name nope.test; }
+X
+ln -sf /etc/nginx/sites-available/authen.test.bak2 /etc/nginx/sites-available/nope.test
+out=$(bash /work/setup_nginx.sh nope.test --retune 2>&1)
+check "refused"                "refusing to edit it" "$out"
+
+echo
+echo "=========== TEST: --retune needs an existing vhost ==========="
+out=$(bash /work/setup_nginx.sh ghost.test --retune 2>&1)
+check "told you to install"    "run without it first" "$out"
+
+echo
+echo "=========== FINAL RESULT ==========="
 echo "  $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
