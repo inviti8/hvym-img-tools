@@ -1,4 +1,4 @@
-# hallucinate — AI-reimagined character texture
+# hallucinate — AI-generated props and set dressing
 
 **Status (2026-08-27): DESIGN. Not implemented.** This is the plan; nothing is
 built. Grounded in the measured evaluation in
@@ -18,17 +18,46 @@ purpose, and says so in its name. Two tools, opposite contracts, one framework.
 
 ---
 
-## 1. Why this exists
+## 1. Why this exists — and what it is actually for
 
 The Paint3D evaluation killed it as a *reangle* backend for one reason: with
 IP-Adapter conditioned on the artist's own drawing, it still produced a
 different character — different face, proportions, Stable Diffusion's house
 style. That is disqualifying when the promise is "your linework, moved".
 
-It is not disqualifying when the promise is "your character, reimagined". The
-same behaviour becomes the product, provided the artist opts in knowing what
-they are getting. The name is doing real work here: **`hallucinate` tells the
-artist it invents.** Do not soften it to `restyle` or `enhance`.
+**It is not a character tool. It is a set-dressing tool.**
+
+An artist will not hand their protagonist to a model that reinterprets faces.
+They will happily hand it a chair, a rock, a crate, a lamp — the objects a scene
+needs but nobody wants to spend an afternoon drawing. Style drift on a rock costs
+nothing; style drift on your lead character costs everything.
+
+That reframing drives the rest of this document:
+
+```
+rough sketch of a chair  ──▶  hallucinate  ──▶  a chair you like
+                                                      │
+                                            draw on top of it
+```
+
+The output is a **starting point, not a finished asset.** That has three
+consequences worth designing around:
+
+- **The quality bar is lower than it looks.** It has to be good enough to draw
+  over, not good enough to ship. Speed and plausibility beat fidelity.
+- **Output should be easy to overdraw** — clean and unfussy, not busy with
+  invented micro-detail that the artist then has to paint out.
+- **Props are the easy case for the model.** Diffusion models are extremely good
+  at chairs and rocks; they are bad at *your specific character*. The tool plays
+  to the strength instead of fighting the weakness.
+
+It also plays to a measured strength on the geometry side: voxel remeshing
+collapses chart count by welding nearby surfaces, which mangles a character with
+thin limbs and a gap between the legs, but should cost far less on a mostly
+convex prop (see [FINDINGS.md](../benchmark/paint3d/FINDINGS.md), Follow-up 2).
+
+The name still does real work: **`hallucinate` tells the artist it invents.** Do
+not soften it to `restyle` or `enhance`.
 
 ## 2. Contract
 
@@ -38,11 +67,11 @@ POST /tools/hallucinate     multipart/form-data
 
 ```python
 class HallucinateInput(BaseModel):
-    image: FileBytes = Field(description="Character drawing (PNG/JPEG), any size or background")
+    image: FileBytes = Field(description="Rough sketch (PNG/JPEG), any size or background")
     prompt: str = Field(
         default="",
         max_length=400,
-        description="What to reimagine it as. Empty = infer from the drawing alone.",
+        description="What to make it, e.g. 'a wooden chair'. Empty = infer from the sketch.",
     )
     seed: int = Field(
         default=0, ge=0, le=2**31 - 1,
@@ -79,9 +108,15 @@ drawing ──▶ matte (isnet) ──▶ TripoSR ──▶ mesh
                               back-project views ──▶ atlas ──▶ .glb
 ```
 
-Geometry is **reangle's existing path, unchanged** — matte, then TripoSR. Only
-the texturing differs. That reuse matters: it keeps one reconstruction
-implementation, and TripoSR is already warm in the model cache.
+Geometry is **reangle's existing path** — matte, then TripoSR — plus a remesh
+step. That reuse matters: it keeps one reconstruction implementation, and
+TripoSR is already warm in the model cache.
+
+The remesh is new and is measured (FINDINGS.md Follow-up 2). For props, voxel
+remesh at ~0.02 pitch is the candidate: 13.7× fewer UV charts, and its cost —
+bridging gaps between nearby surfaces — is much smaller on a convex object than
+on a character. Decimation to ~10% is the conservative fallback, nearly free on
+silhouette.
 
 ### Stage 2 is deliberately omitted
 
@@ -169,18 +204,22 @@ clean. Not researched yet.
 
 ## 8. Open questions
 
-1. **Does stage 1 hold up across characters?** Tested on exactly one
-   (`alice_char2`). REANGLE_PIPELINE.md §4.1 already establishes that pose is
-   the constraint for reconstruction; whether it is also the constraint for
-   generated texture is unknown.
+1. **Does it hold up on props?** Everything measured so far used
+   `alice_char2` — a character, and close to the worst case for both voxel
+   remeshing and generative texturing. The intended inputs are chairs and rocks.
+   **This is now the most important untested assumption in the document**, and
+   it needs a real rough prop sketch to test honestly rather than a synthetic
+   one.
 2. **Should `prompt` be exposed at all?** A free-text prompt is a wide surface —
    it invites results far from the drawing and is the main path to content we
    would rather not generate. A fixed internal prompt plus `strength` is
    narrower and more predictable. Leaning toward exposing it, but it is a real
    choice.
-3. **Would a remesh/decimation pass help?** It is the prerequisite for any
-   UV-space work (stage 2, disocclusion fill), and might improve stage 1's
-   back-projection too. Untested, and the single highest-value next experiment.
+3. ~~**Would a remesh/decimation pass help?**~~ **Answered: yes.** Decimating
+   to 10% of faces gives 5.9× fewer UV charts while keeping 97.6% of the
+   silhouette — free enough that reangle should probably adopt it regardless.
+   Voxel remesh reaches 50× fewer charts but inflates the silhouette by bridging
+   gaps, which is not correctable by an offset. See FINDINGS.md Follow-up 2.
 4. **Is there a permissively-licensed base model** that would keep §6 clean?
 
 ## 9. What is already proven

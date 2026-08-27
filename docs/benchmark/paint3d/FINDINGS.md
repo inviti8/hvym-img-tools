@@ -153,6 +153,65 @@ exercised until the mesh unwraps into coherent charts. **Mesh topology is the
 blocker, not the texture model** — the same conclusion Finding 2 reached from
 the other direction.
 
+## Follow-up 2: does remeshing give coherent charts?
+
+Yes — with a real trade-off, and a different sweet spot per tool. Run entirely
+on CPU (decimation and xatlas need no GPU), measuring UV islands after unwrap
+and silhouette IoU against the original mesh.
+
+| method | faces | UV islands | vs baseline | silhouette kept |
+|---|---|---|---|---|
+| baseline (TripoSR) | 29,887 | 1,015 | — | 1.000 |
+| decimate 25% | 7,471 | 248 | 4.1× | **0.982** |
+| decimate 10% | 2,988 | 173 | 5.9× | 0.976 |
+| decimate 5% | 1,494 | 120 | 8.5× | 0.959 |
+| voxel remesh 0.015 | 7,554 | 104 | 9.8× | 0.855 |
+| voxel remesh 0.02 | 4,460 | 74 | 13.7× | 0.809 |
+| voxel remesh 0.03 | 1,996 | **20** | **50.8×** | 0.772 |
+
+**Decimation is close to free.** Quadric decimation to 10% of the faces gives
+~6× fewer charts while keeping 97.6% of the silhouette. For reangle — where the
+proxy matching the artist's outline is the whole point — this is a clear win with
+no meaningful downside, and it also cuts mesh size ~10×.
+
+**Voxel remesh trades silhouette for coherence.** It reaches 20 charts with a
+median island of ~15,900 texels, which is a genuinely usable atlas, but at 0.772
+IoU.
+
+### The 0.772 is not what it looks like, and the obvious fix does not work
+
+Rendering the silhouettes (`remesh_silhouettes.png`, blue = added, red = lost)
+shows the voxel results are almost entirely **blue**: at pitch 0.02 it loses only
+**0.1%** of the original silhouette while *adding* 23.5%. It inflates rather than
+erodes — essentially no detail is destroyed.
+
+That looked correctable, so it was tested. It is not:
+
+| correction | result |
+|---|---|
+| erode one voxel cell before marching cubes | overshoots badly — 21.8% of the silhouette lost |
+| shrink along vertex normals by 0.35–0.7 × pitch | 23.5% → 23.0% added. No real effect. |
+
+The reason is that the inflation is not a surface offset. `.fill()` at a coarse
+pitch **bridges gaps** — between the legs, between arm and torso — which is
+topological merging that no offset can undo. It is also exactly *why* the chart
+count collapses: it welds separate surfaces into one blob. The chart win and the
+silhouette cost are the same mechanism, so they cannot be separated this way.
+
+### Operating points
+
+- **reangle** — decimate to ~10%. 5.9× fewer charts, 97.6% silhouette kept, and
+  a 10× smaller mesh for free. Worth adopting on its own merits.
+- **hallucinate** — voxel remesh is viable where silhouette fidelity is secondary
+  to a clean atlas. Note that `alice_char2` is close to the worst case for it:
+  thin limbs, a ponytail, a gap between the legs. **A chair or a rock has far
+  fewer gaps to bridge**, so the cost should be substantially lower on the props
+  this tool is actually aimed at — untested, and the obvious next measurement.
+
+Either way the topology blocker is real but not fundamental: **a 6× to 50×
+reduction in chart count is available, and the cheap end of that range is
+free.** UV-space work is no longer ruled out.
+
 ## What survives
 
 Two things are worth keeping from this:
