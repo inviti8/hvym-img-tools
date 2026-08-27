@@ -90,9 +90,15 @@ print('ok: numpy pinned at', numpy.__version__)"
 
 # --- TRELLIS source --------------------------------------------------------
 ARG TRELLIS_REF=main
-RUN git clone --depth 1 --branch ${TRELLIS_REF} \
+# --recurse-submodules is REQUIRED, unlike the TripoSR clone this was patterned
+# on: flexicubes (the mesh extractor) is a submodule, and without it the import
+# dies at `trellis.representations.mesh.flexicubes.flexicubes`.
+RUN git clone --depth 1 --shallow-submodules --recurse-submodules \
+        --branch ${TRELLIS_REF} \
         https://github.com/microsoft/TRELLIS.git ${TRELLIS_PATH} \
-    && rm -rf ${TRELLIS_PATH}/.git
+    && find ${TRELLIS_PATH} -name .git -maxdepth 3 -exec rm -rf {} + \
+    && test -f ${TRELLIS_PATH}/trellis/representations/mesh/flexicubes/flexicubes.py \
+       || (echo "flexicubes submodule missing after clone" && exit 1)
 
 # Prove TRELLIS imports BEFORE downloading several GB of weights. Its
 # dependency chain is long and fails one module at a time; discovering that
