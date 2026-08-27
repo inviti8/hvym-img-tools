@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Point a tool at its own RunPod serverless endpoint, on an installed proxy.
 #
-#   curl -fsSL https://raw.githubusercontent.com/inviti8/hvym-img-tools/main/scripts/set_tool_endpoint.sh -o set_tool_endpoint.sh
+#   curl -fsSLO https://raw.githubusercontent.com/inviti8/hvym-img-tools/main/scripts/set_tool_endpoint.sh
 #   sudo bash set_tool_endpoint.sh mesh km99b7mrj2f85r
 #   sudo bash set_tool_endpoint.sh --list
 #   sudo bash set_tool_endpoint.sh --remove mesh
 #
 # Tools live on separate endpoints (docs/tools/mesh.md), so the proxy resolves
 # RUNPOD_ENDPOINT_ID_<TOOL> first and falls back to RUNPOD_ENDPOINT_ID. This
-# edits only that one variable in /etc/hvym-img-tools/proxy.env and restarts the
+# edits only that one variable in /etc/hvym-img-tools/proxy.env and RECREATES the
 # container; it never touches your keys, and never touches nginx.
+#
+# Recreate, not restart: docker reads --env-file once at `run` and bakes the
+# result into the container config, so `docker restart` silently ignores any
+# edit to that file.
 #
 # Separate from update_proxy.sh on purpose: that script changes which IMAGE
 # runs, this changes CONFIGURATION. Conflating them would mean you could not fix
@@ -100,10 +104,32 @@ fi
 mv "$TMP" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-step "Restarting the proxy"
-if ! docker restart "$NAME" >/dev/null 2>&1; then
+step "Recreating the proxy"
+# NOT `docker restart`. --env-file is read once, at `docker run`, and baked into
+# the container's config; a restart reuses the ORIGINAL environment and silently
+# ignores every edit made here. That cost a debugging round: the variable was
+# written correctly, the container never saw it, and this script's own warning
+# blamed the image version.
+IMAGE=$(docker inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null)
+[ -n "$IMAGE" ] || die "$NAME is not running; start it with install_proxy.sh first"
+ok "reusing image $IMAGE"
+
+start_proxy() {
+  docker run -d --name "$NAME" \
+    --restart=unless-stopped \
+    -p "${BIND}:${PORT}:8080" \
+    --memory="${HVYM_MEM_LIMIT:-512m}" \
+    --memory-reservation="${HVYM_MEM_RESERVE:-256m}" \
+    --cpus="${HVYM_CPUS:-0.5}" \
+    --env-file "$ENV_FILE" \
+    "$IMAGE" >/dev/null 2>&1
+}
+
+docker rm -f "$NAME" >/dev/null 2>&1
+if ! start_proxy; then
   cp -p "$BACKUP" "$ENV_FILE"
-  die "could not restart $NAME -- restored the previous config"
+  start_proxy && die "could not start with the new config -- restored the previous one" \
+    || die "could not restart the proxy at all. Run: sudo bash install_proxy.sh"
 fi
 
 health=""
@@ -115,7 +141,8 @@ done
 if [ -z "$health" ]; then
   warn "the proxy did not come back healthy; restoring the previous config"
   cp -p "$BACKUP" "$ENV_FILE"
-  docker restart "$NAME" >/dev/null 2>&1
+  docker rm -f "$NAME" >/dev/null 2>&1
+  start_proxy
   die "rolled back. Check: docker logs $NAME"
 fi
 ok "healthz: $health"
@@ -128,8 +155,9 @@ esac
 if [ "$ACTION" = "set" ]; then
   case "$health" in
     *"\"$TOOL\""*) ok "the proxy is now routing '$TOOL' to its own endpoint" ;;
-    *) warn "'$TOOL' is not listed in tool_endpoints -- is the proxy image new enough?
-         Per-tool routing needs hvym-img-proxy 0.3.0 or later:
+    *) warn "'$TOOL' is not in tool_endpoints. Either the container did not pick up
+         the env file, or the image predates per-tool routing (needs 0.3.0+):
+           docker inspect $NAME --format '{{.Config.Image}}'
            sudo bash update_proxy.sh 0.3.1" ;;
   esac
 fi
@@ -142,5 +170,7 @@ cat <<EOF
     curl -X POST https://<your-domain>/tools/${TOOL} \\
          -H "X-API-Key: \$KEY" -F image=@sketch.png -o reference.glb
 
-  ${DIM}Undo: sudo cp $BACKUP $ENV_FILE && sudo docker restart $NAME${OFF}
+  ${DIM}Undo: sudo cp $BACKUP $ENV_FILE && sudo bash $0 --list${OFF}
+  ${DIM}      (then re-run this script; a plain 'docker restart' would NOT
+  ${DIM}       pick the restored file up)${OFF}
 EOF

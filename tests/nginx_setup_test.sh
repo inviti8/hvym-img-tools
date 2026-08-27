@@ -1,3 +1,12 @@
+# setup_nginx.sh -- needs a real nginx, so run it in the nginx image, not ours:
+#   docker run --rm -v "$PWD/tests:/tmp/h:ro" -v "$PWD/scripts:/work:ro" \
+#     --entrypoint bash nginx:1.27 -c \
+#     'apt-get -qq update >/dev/null && apt-get -qq install -y curl >/dev/null
+#      bash /tmp/h/nginx_setup_test.sh'
+#
+# The harness stands up an `authen.test` neighbour first and checks it is still
+# serving afterwards: this script runs on a VPS hosting a live project, so
+# "did not break the neighbour" is the assertion that matters most.
 set -u
 PASS=0; FAIL=0
 check() { # description, expected-substring, actual
