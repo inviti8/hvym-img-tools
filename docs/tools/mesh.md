@@ -1,7 +1,7 @@
 # mesh — sketch to an untextured 3D reference
 
 **Status (2026-08-27): LIVE.** Endpoint `km99b7mrj2f85r`, image
-`ghcr.io/inviti8/hvym-img-mesh:0.3.0`. Verified end to end through the proxy. Every number here is
+`ghcr.io/inviti8/hvym-img-mesh:0.3.1`. Verified end to end through the proxy. Every number here is
 measured; sources are in
 [`../benchmark/paint3d/FINDINGS.md`](../benchmark/paint3d/FINDINGS.md).
 
@@ -171,8 +171,8 @@ Chair and rock sketches through the real chain (proxy → RunPod → worker):
 
 | | |
 |---|---|
-| Steady-state work | **4.1 s** |
-| First job on a fresh worker | **~57 s** |
+| Steady-state work | **~5 s** |
+| First job on a fresh worker | **5.4 s** (was 57 s before the warm-up fix) |
 | Cache hit | 0.015 s |
 | Output | exactly 20,000 faces, **0.35 MB**, untextured, 99.9% one component |
 | `X-Cache-Key` | returned, stable across repeats |
@@ -180,10 +180,10 @@ Chair and rock sketches through the real chain (proxy → RunPod → worker):
 Decimation and file size landed exactly where the design predicted, and the
 delivered chair still reads as a chair (`../benchmark/mesh_endpoint_live.png`).
 
-### The warm lease does not warm this tool properly
+### Kernel warm-up — found here, fixed in 0.3.1
 
-**A held lease reports `warm`, and the next real job still costs ~57 s.** Only
-the job after that drops to 4.1 s — a 14× difference that a client would
+**On 0.3.0 a held lease reported `warm` and the next real job still cost ~57 s**,
+with only the job after it dropping to 4.1 s. A 14× swing a client would
 experience as the tool being wildly inconsistent.
 
 The cause is our own keepalive. `serverless.py` short-circuits `__warm__` before
@@ -192,12 +192,19 @@ keeps the *process* alive but never runs a kernel, so CUDA/spconv initialisation
 is still paid by the first genuine request. For TripoSR this was invisible —
 its whole job is ~2 s. TRELLIS makes it a ~54 s surprise.
 
-**Fix (not yet applied, needs an image rebuild):** run one tiny inference inside
-`init()` when `HVYM_WARM_ON_STARTUP` is set, so the cost lands once at worker
-startup where it belongs, rather than on an artist's first request. Do *not*
-move it into the `__warm__` ping — that would pay it every few seconds.
+**Fixed in 0.3.1** by `Tool.warmup()`, called once from `init()` after models
+are warmed: the mesh tool runs one tiny reconstruction so the kernels initialise
+at worker startup rather than on an artist's first request. Deliberately *not*
+in the `__warm__` ping, which fires every few seconds and must stay free.
 
-Until then, quote **~57 s for the first request after idle** rather than 4 s.
+Measured after the fix, on a fresh worker:
+
+| | 0.3.0 | **0.3.1** |
+|---|---|---|
+| First job | 57.0 s | **5.4 s** |
+| Second job | 4.1 s | 5.5 s |
+
+First and second are now the same speed — the cliff is gone.
 
 ## 7. What is measured, and what is not
 
