@@ -44,7 +44,17 @@ log = logging.getLogger(__name__)
 #: to pull a ~6.5GB image before it loads a single model -- so the budget below is
 #: whole-operation wall clock, not per-HTTP-call. Warm requests return in ~2s.
 RUNPOD_BASE = "https://api.runpod.ai/v2"
-DEFAULT_TIMEOUT = float(os.environ.get("HVYM_PROXY_TIMEOUT", "600"))
+
+#: Was 600s, which a measured 547s cold mesh start cleared by 53 seconds. It also
+#: quietly outranked the nginx fix: with proxy_read_timeout raised to 900s, this
+#: was the tighter of the two and gave up first.
+#:
+#: The ordering is deliberate, not incidental. This budget must stay BELOW nginx's
+#: read timeout so a genuinely stuck job returns our JSON {"detail": ...} and the
+#: artist sees a real message -- if nginx wins the race they get its HTML 504
+#: instead, which is what a mesh cold start produced before any of this was fixed.
+#: Keep the gap: proxy 840s < nginx 900s.
+DEFAULT_TIMEOUT = float(os.environ.get("HVYM_PROXY_TIMEOUT", "840"))
 
 #: /runsync does not block indefinitely: RunPod caps it server-side (~90s) and
 #: then hands back the job still IN_QUEUE rather than the result. That is not an

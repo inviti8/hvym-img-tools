@@ -794,3 +794,32 @@ def test_cache_hit_still_reports_the_tool_version():
     hit = src[src.index('"cached": True'):]
     hit = hit[: hit.index("try:")] if "try:" in hit else hit
     assert "tool_version" in hit, "cache hits must report the tool version too"
+
+
+def test_proxy_budget_clears_a_cold_start_but_loses_to_nginx():
+    """Two layers, and the order between them is load-bearing.
+
+    Measured cold mesh start: 547s. At the old 600s budget that was 53s of
+    margin, and an A100-only test confirmed the failure mode -- the proxy
+    returned {"detail": "job IN_QUEUE after 600s"} at 605s.
+
+    The budget must also stay UNDER nginx's proxy_read_timeout: whichever
+    expires first decides what the artist sees, and ours is a JSON detail
+    while nginx's is an HTML error page.
+    """
+    import re
+
+    from hvym_img_tools.proxy import DEFAULT_TIMEOUT
+
+    nginx_default = int(
+        re.search(
+            r"^READ_TIMEOUT=(\d+)",
+            open("scripts/setup_nginx.sh", encoding="utf-8").read(),
+            re.M,
+        ).group(1)
+    )
+    assert DEFAULT_TIMEOUT > 547, "must clear a measured cold start"
+    assert DEFAULT_TIMEOUT < nginx_default, (
+        f"proxy budget {DEFAULT_TIMEOUT}s must expire before nginx's "
+        f"{nginx_default}s, or the client gets nginx HTML instead of our JSON"
+    )
