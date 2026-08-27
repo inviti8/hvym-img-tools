@@ -287,8 +287,10 @@ class FakeRunPod:
     """Counts keepalive jobs and serves worker counts, so tests assert on what
     the pool actually sent rather than on wall-clock warmth."""
 
-    def __init__(self, ready: int = 0):
+    def __init__(self, ready: int = 0, running: int = 0, initializing: int = 0):
         self.ready = ready
+        self.running = running
+        self.initializing = initializing
         self.warm_jobs = 0
         self.other_jobs = 0
 
@@ -320,7 +322,9 @@ class FakeRunPod:
             async def get(self, url, headers=None):
                 return httpx.Response(
                     200,
-                    json={"workers": {"ready": up.ready, "initializing": 0}},
+                    json={"workers": {"ready": up.ready, "running": up.running,
+                                      "idle": 0, "initializing": up.initializing,
+                                      "throttled": 0}},
                     request=httpx.Request("GET", url),
                 )
 
@@ -694,3 +698,29 @@ def test_direct_server_warm_is_a_harmless_noop(monkeypatch):
     assert body["ready"] is True
     assert body["no_op"] is True
     assert client.post("/warm", json={"lease_id": "abc"}).json()["lease_id"] == "abc"
+
+
+def test_a_busy_worker_still_counts_as_warm(monkeypatch):
+    """Found on the live deployment. A worker EXECUTING a job reports `running`,
+    not `ready`. Judging warmth by `ready` alone meant our own 6s keepalive kept
+    the worker permanently busy from a well-connected proxy, so the state never
+    left "warming" -- while the endpoint reported 41 completed jobs. Warm means a
+    worker is up with models resident: ready, idle or running."""
+    fake = FakeRunPod(ready=0, running=1).install(monkeypatch)
+    clock = Clock()
+
+    async def scenario():
+        pool = _pool(clock)
+        await pool.acquire("busy")
+        status = await pool.status()
+        assert status["state"] == "warm", "a running worker is warm, not warming"
+        assert status["ready"] is True
+
+        # Initializing is NOT warm -- it cannot serve without a wait.
+        fake.running = 0
+        fake.initializing = 1
+        clock.advance(warm_mod.HEALTH_CACHE_S + 1)
+        assert (await pool.status())["state"] == "warming"
+        await pool.shutdown()
+
+    asyncio.run(scenario())

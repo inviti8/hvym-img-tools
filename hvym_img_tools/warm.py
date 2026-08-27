@@ -121,7 +121,8 @@ class WarmPool:
         #: "warming, up to ~4 min" without us inventing an ETA.
         self._session_started: float | None = None
 
-        self._workers_ready = 0
+        self._workers_ready = 0        # ready + idle + running (see _get_health)
+        self._workers: dict[str, int] = {}
         self._health_checked_at: float | None = None
         self._pings = 0
 
@@ -192,7 +193,18 @@ class WarmPool:
                 )
             if resp.status_code < 400:
                 workers = (resp.json() or {}).get("workers") or {}
-                self._workers_ready = int(workers.get("ready") or 0)
+                self._workers = {k: int(v or 0) for k, v in workers.items()}
+                # "Warm" means a worker is UP with models resident -- which covers
+                # ready, idle AND running. Counting only `ready` was wrong: our own
+                # keepalive puts the worker into `running`, so from a proxy with a
+                # fast link to RunPod the 6s ping cadence kept it permanently busy
+                # and `ready` never rose above 0. The endpoint reported 41 completed
+                # jobs while the client sat at "warming" for nine minutes.
+                # `initializing` and `throttled` are deliberately excluded: neither
+                # can serve a request without a wait.
+                self._workers_ready = sum(
+                    self._workers.get(k, 0) for k in ("ready", "idle", "running")
+                )
         except (httpx.HTTPError, ValueError):
             # A health blip must not change the answer to "is a lease held".
             log.debug("warm: health check failed", exc_info=True)
@@ -355,6 +367,7 @@ class WarmPool:
             "state": self._state(),
             "ready": self._workers_ready > 0,
             "workers_ready": self._workers_ready,
+            "workers": self._workers or None,
             "active_leases": len(self._leases),
             "elapsed_s": round(self._elapsed_s(), 1),
             "expires_at": self._next_expiry_iso(),
