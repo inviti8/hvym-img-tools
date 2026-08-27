@@ -4,8 +4,10 @@ Ran against the live reangle mesh on a rented RTX 4090 (~1 h, ~$0.74). The
 question was whether a generative texture model improves on our front-projection,
 particularly for regions the projection cannot cover.
 
-**Verdict: no, not as a texture source. Keep the projection.** The one idea worth
-keeping is narrower than it first looked — see [What survives](#what-survives).
+**Verdict: no, not as a texture source. Keep the projection.** A follow-up test
+of the seeded low-denoise hybrid produced one genuinely reusable result — the
+style-preservation lever is compositing, not `denoising_strength` — but also
+confirmed that our mesh topology blocks the whole UV-space approach.
 
 ---
 
@@ -81,6 +83,75 @@ automatic unwrap of a marching-cubes mesh is exactly what breaks the inpainter.
 Being handed the unwrap for free is no help when the unwrap is the problem.
 
 ---
+
+## Follow-up: the seeded low-denoise experiment
+
+The idea worth testing was a hybrid — seed the model with the artist's own
+pixels instead of noise, then run at low `denoising_strength` so it only extends
+rather than reinvents. Paint3D's UV models expect the mesh's xatlas layout, so
+the drawing was re-baked into that atlas via Paint3D's own UV-position render:
+front-facing texels get the artist's pixels, the rest are left genuinely empty.
+That produced a **52.2% seeded / 23.4% holes** atlas — real disocclusion holes,
+which `front_planar_uv` never creates because it mirror-smears instead.
+
+Then a sweep: `denoising_strength` ∈ {0.30, 0.45, 0.60, 0.75, 1.00} ×
+`guidance_scale` ∈ {3, 7}, fixed seed, IP-Adapter on the artist's drawing.
+"Drift" is mean |Δ| on texels the artist actually painted — style override,
+ideally zero.
+
+### The dial does nothing
+
+| denoise | raw drift | composited drift | hole fill |
+|---|---|---|---|
+| 0.30 | 6.37 | **0.00** | 71.9 % |
+| 0.45 | 6.36 | **0.00** | 73.1 % |
+| 0.60 | 6.35 | **0.00** | 74.6 % |
+| 0.75 | 6.36 | **0.00** | 74.7 % |
+| 1.00 | 6.38 | **0.00** | 74.7 % |
+
+Across the entire sweep, raw drift moves by **0.29/255 — 0.1%**. Turning
+`denoising_strength` from 0.3 to 1.0 does not meaningfully protect the artist's
+pixels.
+
+The reason is that the constant ~6.4 loss is not the diffusion at all: the
+inpainting pipeline VAE-encodes and decodes the *whole* 1024² atlas, so the
+unmasked region takes a round-trip hit no dial can tune away.
+
+### The right lever is compositing, not the dial
+
+Keep the artist's pixels verbatim outside the mask and take the model's output
+only inside it. Drift becomes **exactly 0.00** — perfect preservation by
+construction rather than by hoping a parameter is low enough.
+
+That inverts the tuning intuition. "Minimal style injection" is not achieved by
+turning the model down; it is achieved by **masking it out where the art exists,
+and then turning it up where it is allowed to work** — higher denoise gives
+better hole fill (74.7% vs 71.9%) and costs nothing, because inside a hole there
+is no artist's work to protect.
+
+This is a reusable result: it applies to any generative fill we ever bolt onto
+the projection, not just Paint3D.
+
+### But on this mesh it is academic
+
+The atlas our TripoSR mesh unwraps into:
+
+| | |
+|---|---|
+| UV islands | **3,035** |
+| Median island | **2 texels** (~1.4 px across) |
+| Islands under 100 texels | 2,679 — **88%** |
+| Largest island | 3.2% of the surface |
+
+A median island of two texels cannot carry linework, and neither the artist's
+art nor a diffusion model can do anything useful with slivers that size. That is
+why `seeded_comparison.png` is nearly featureless grey in all three panels — the
+detail is lost in the *bake*, before any model runs.
+
+So the compositing insight is sound and worth keeping, but it cannot be
+exercised until the mesh unwraps into coherent charts. **Mesh topology is the
+blocker, not the texture model** — the same conclusion Finding 2 reached from
+the other direction.
 
 ## What survives
 

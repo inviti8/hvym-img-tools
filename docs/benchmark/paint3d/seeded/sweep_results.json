@@ -1,0 +1,92 @@
+[
+ {
+  "denoise": 0.3,
+  "guidance": 3.0,
+  "ip_adapter": true,
+  "drift": 9.62,
+  "fill": 0.719,
+  "variety": 51.87,
+  "secs": 4.5
+ },
+ {
+  "denoise": 0.3,
+  "guidance": 7.0,
+  "ip_adapter": true,
+  "drift": 9.85,
+  "fill": 0.723,
+  "variety": 51.64,
+  "secs": 3.4
+ },
+ {
+  "denoise": 0.45,
+  "guidance": 3.0,
+  "ip_adapter": true,
+  "drift": 9.36,
+  "fill": 0.731,
+  "variety": 51.82,
+  "secs": 3.7
+ },
+ {
+  "denoise": 0.45,
+  "guidance": 7.0,
+  "ip_adapter": true,
+  "drift": 9.67,
+  "fill": 0.743,
+  "variety": 51.3,
+  "secs": 3.7
+ },
+ {
+  "denoise": 0.6,
+  "guidance": 3.0,
+  "ip_adapter": true,
+  "drift": 9.21,
+  "fill": 0.746,
+  "variety": 51.57,
+  "secs": 4.3
+ },
+ {
+  "denoise": 0.6,
+  "guidance": 7.0,
+  "ip_adapter": true,
+  "drift": 9.59,
+  "fill": 0.755,
+  "variety": 51.04,
+  "secs": 4.3
+ },
+ {
+  "denoise": 0.75,
+  "guidance": 3.0,
+  "ip_adapter": true,
+  "drift": 9.19,
+  "fill": 0.747,
+  "variety": 51.81,
+  "secs": 4.9
+ },
+ {
+  "denoise": 0.75,
+  "guidance": 7.0,
+  "ip_adapter": true,
+  "drift": 9.61,
+  "fill": 0.757,
+  "variety": 51.11,
+  "secs": 4.8
+ },
+ {
+  "denoise": 1.0,
+  "guidance": 3.0,
+  "ip_adapter": true,
+  "drift": 9.2,
+  "fill": 0.747,
+  "variety": 51.84,
+  "secs": 5.7
+ },
+ {
+  "denoise": 1.0,
+  "guidance": 7.0,
+  "ip_adapter": true,
+  "drift": 9.63,
+  "fill": 0.754,
+  "variety": 51.12,
+  "secs": 5.7
+ }
+]
