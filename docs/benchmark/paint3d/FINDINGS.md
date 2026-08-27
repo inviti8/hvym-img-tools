@@ -255,6 +255,62 @@ is measured false. Voxel remesh should be treated as unsafe for anything with an
 open frame, and the operating point cannot be chosen per-category — it has to be
 chosen per-mesh, or decimation used throughout.
 
+## Follow-up 4: texturing the chair — the model is not the problem
+
+Four stage-1 runs on the chair mesh, varying only what an artist would vary.
+Images in [`chair/`](chair/).
+
+| run | IP-Adapter | wall | result |
+|---|---|---|---|
+| "wooden dining chair, oak, studio photo" | on | 272 s | line art, broken chair |
+| "concept art, cel shaded, clean line art" | on | 161 s | line art, broken chair |
+| no prompt | on | 111 s | line art, broken chair |
+| "wooden dining chair, oak, studio photo" | **off** | 203 s | **excellent oak, broken chair** |
+
+Two separate results, and it matters which is which.
+
+**Style control works, and works well.** Without IP-Adapter the wood prompt
+produced convincing oak with believable studio lighting. With IP-Adapter on the
+sketch, the *sketch's* line-art style dominated and the output came back as line
+art — so the two are a real dial between "reinterpret the material" and "keep my
+drawing's look". That is a usable control surface.
+
+**Structure control does not exist, because the structure was already gone.**
+Every run produced the same broken chair: detached legs, disconnected back
+rails, one leg floating free. `chair/depth_conditioning.png` is the depth map
+Paint3D fed ControlNet, and **it is already a broken chair.** Stable Diffusion
+rendered faithfully what it was handed. The texture model did nothing wrong.
+
+### TripoSR fails on thin-framed objects, and the silhouette hides it
+
+This corrects Follow-up 3. The chair's front silhouette looked clean — four
+distinct legs, proper seat and back — and on that basis the reconstruction was
+called good. From a 3/4 view the mesh is plainly fragmented. **A head-on
+silhouette is not evidence of sound geometry**, which is worth remembering
+because it is exactly the view our silhouette IoU metric measures.
+
+So the prop category splits, and not along the axis the design assumed:
+
+| | reconstruction | notes |
+|---|---|---|
+| **Solid volumes** — rocks, boulders, barrels | fine | the rock reconstructed well |
+| **Thin frames** — chairs, tables, ladders, railings | **poor** | members break up; this is the failure |
+
+"Props are easier" was wrong twice: once for remeshing (Follow-up 3), and here
+for reconstruction. What is actually true is narrower — *solid* props are easy,
+and thin-framed ones are harder than a character, whose limbs are at least thick
+relative to their length.
+
+### What would fix it
+
+Not a better texture model. **A better image-to-3D backbone.** TripoSR is from
+early 2024 and was chosen for speed and an MIT licence, not for thin structures.
+`ReangleInput` already carries a `backbone` field for exactly this substitution,
+so it is an isolated change rather than a redesign — and it would improve
+reangle too, since a chair or a ladder in a scene has the same problem there.
+
+That is the experiment worth running before any more texture work.
+
 ## What survives
 
 Two things are worth keeping from this:
