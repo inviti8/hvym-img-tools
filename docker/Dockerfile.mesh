@@ -4,6 +4,11 @@
 # TRELLIS in would lengthen an already ~260s cold start for every reangle
 # request, to serve a tool most requests never call.
 #
+# **This image tops out at sm_90 -- never give its endpoint a Blackwell pool**
+# (ADA_32_PRO, BLACKWELL_96, BLACKWELL_180). The reangle image was widened to
+# 12.0+PTX and verified on an RTX 5090; this one cannot follow, because the
+# wheels below are built per (torch, CUDA) pair. See docs/DEPLOY.md.
+#
 # **Torch is pinned to 2.4.1+cu124, deliberately older than the reangle image's
 # 2.8/cu128.** kaolin, xformers and spconv all ship wheels per (torch, CUDA)
 # pair, and 2.4.1+cu124 is the combination the TRELLIS evaluation actually

@@ -75,8 +75,27 @@ docker build -f docker/Dockerfile       -t hvym-img-tools:0.1.0 .
 docker build -f docker/Dockerfile.proxy -t hvym-img-proxy:0.1.0 .
 ```
 
-The GPU image builds for compute **8.6 and 8.9** (`TORCH_CUDA_ARCH_LIST`), covering
-A40/A6000/A5000/3090 and 4090/L4/L40S — the serverless tiers we might land on.
+### Which GPUs each image may run on
+
+**This is not a preference — it is a hard constraint, and the two images differ.**
+Each compiles CUDA kernels for a fixed architecture list; a card outside that list
+fails at *runtime* with "no kernel image is available for execution on the device".
+The build says nothing, so getting this wrong looks like a working deploy.
+
+| Image | Built for | GPU pools it may be given | Verified |
+|---|---|---|---|
+| `hvym-img-tools` (reangle) | `8.0;8.6;8.9;9.0;12.0+PTX` (torch 2.8/cu128) | `ADA_24`, `AMPERE_24`, `ADA_32_PRO`, `AMPERE_80`, `BLACKWELL_96`, `HOPPER_141` | **yes** — a job pinned to `ADA_32_PRO` ran on an RTX 5090 (sm_120), 45.5 s, HTTP 200 |
+| `hvym-img-mesh` | torch 2.4.1/cu124 + kaolin/spconv wheels, max **sm_90** | `ADA_24`, `AMPERE_24`, `AMPERE_80` | 4090 yes; A100 placement only |
+
+**Never give the mesh endpoint a Blackwell pool** (`ADA_32_PRO`, `BLACKWELL_96`,
+`BLACKWELL_180`). Its torch/kaolin/spconv pins top out at sm_90, and 2.4.1+cu124 is
+the exact combination TRELLIS was evaluated against — moving it fights the whole
+constraint set (`docker/Dockerfile.mesh` explains why). The reangle image has no such
+pin, which is why only it was widened.
+
+Why it matters: the narrow original list (`8.6;8.9`) left both endpoints on two GPU
+pools in EU-RO-1, and RunPod throttled us for **~9 minutes** waiting on them — a cold
+mesh request measured 547 s wall for 8.7 s of actual work.
 
 ## RunPod Serverless endpoint
 
