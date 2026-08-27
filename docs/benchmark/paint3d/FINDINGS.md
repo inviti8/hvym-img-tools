@@ -311,6 +311,47 @@ reangle too, since a chair or a ladder in a scene has the same problem there.
 
 That is the experiment worth running before any more texture work.
 
+## Follow-up 5: is it the extraction or the model? (the model)
+
+Before assuming a new backbone is needed, the cheap hypothesis was tested:
+`mc_resolution` only controls how finely the implicit field is polygonised, so
+if the field is sound and the extraction is coarse, more resolution should heal
+the chair. Measured by connected components — a sound chair is one shell.
+
+| subject | faces | components | largest component | fragments (<1%) |
+|---|---|---|---|---|
+| rock, mc=256 | 83,430 | 7 | **93.4%** | 3 |
+| chair, mc=256 | 31,731 | 14 | 57.7% | 7 |
+| chair, mc=384 | 75,083 | 19 | **56.8%** | 13 |
+
+**More resolution does not help — it is marginally worse.** The largest
+component stays at ~57% of the mesh while the fragment count rises from 7 to 13,
+because finer extraction resolves *more* small disconnected pieces out of the
+same field. The chair's members are not connected in TripoSR's implicit field to
+begin with, so no amount of polygonisation will join them.
+
+The rock is the control, and it passes: 93.4% of the mesh in a single shell.
+
+This is the evidence that the backbone genuinely has to change, rather than a
+parameter being tuned. It also means the failure is cheap to detect
+automatically: **largest-component fraction is a usable geometry health check**,
+and it is a far better signal than the front-silhouette IoU that misled
+Follow-up 3.
+
+### Aside: mc_resolution=512 OOMs
+
+`mc_resolution=512` fails on a 24 GB card:
+
+```
+CUDA out of memory. Tried to allocate 512.00 MiB.
+GPU 0 has a total capacity of 23.52 GiB of which 497.75 MiB is free.
+```
+
+The `ReangleInput` field advertises `le=512`, so the API accepts a value the
+worker cannot serve on the tier we deploy to. Either the bound should drop to
+384, or the tool should catch the OOM and return a useful error instead of a
+502. Worth fixing regardless of the backbone question.
+
 ## What survives
 
 Two things are worth keeping from this:
