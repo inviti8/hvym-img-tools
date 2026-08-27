@@ -82,6 +82,17 @@ def init() -> Context:
             except Exception:  # noqa: BLE001 - degrade to lazy, don't kill the worker
                 log.exception("model warm-up failed; falling back to lazy load")
 
+        # Loaded != ready: kernels initialise on the first real forward pass.
+        for tool in _TOOLS.values():
+            try:
+                started = time.perf_counter()
+                tool.warmup(ctx)
+                elapsed = time.perf_counter() - started
+                if elapsed > 0.1:
+                    log.info("warmed kernels for %s in %.2fs", tool.name, elapsed)
+            except Exception:  # noqa: BLE001 - a failed warm-up must not kill the worker
+                log.exception("kernel warm-up failed for %s; first request pays it", tool.name)
+
     _CTX = ctx
     log.info("serverless ready: tools=%s device=%s", sorted(_TOOLS), config.resolve_device())
     return ctx

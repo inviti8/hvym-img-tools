@@ -55,6 +55,24 @@ class MeshTool(Tool):
     def model_loaders(self) -> dict[str, object]:
         return {TRELLIS_MODEL_KEY: load_trellis}
 
+    def warmup(self, ctx: Context) -> None:
+        """Run one tiny reconstruction so CUDA/spconv kernels initialise here.
+
+        Measured on the live endpoint: a worker with warm *models* still took
+        ~57s on its first real job and 4.1s on the next. That 14x cliff is
+        kernel initialisation, and an artist should never be the one to pay it.
+
+        A solid shape rather than a blank canvas -- the pipeline mattes its
+        input, and an empty image gives it no foreground to find.
+        """
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (256, 256), (255, 255, 255))
+        ImageDraw.Draw(img).ellipse((64, 64, 192, 192), fill=(90, 90, 90))
+
+        backbone = get_backbone("trellis", ctx.models.get(TRELLIS_MODEL_KEY))
+        backbone.reconstruct(img, seed=0)
+
     def run(self, req: MeshInput, ctx: Context) -> MediaResponse:
         # Declared in model_loaders, so this is a dict lookup rather than the
         # ~14s pipeline load.

@@ -214,6 +214,11 @@ def create_app(config: Config | None = None, *, discover: bool = True) -> FastAP
                     log.info("warmed models: %s", {k: round(v, 2) for k, v in times.items()})
                 except Exception:  # noqa: BLE001 - degrade to lazy load, don't fail startup
                     log.exception("model warm-up failed; falling back to lazy load")
+            for tool in instances:
+                try:
+                    tool.warmup(ctx)
+                except Exception:  # noqa: BLE001 - must not fail startup
+                    log.exception("kernel warm-up failed for %s", tool.name)
         yield
 
     app = FastAPI(

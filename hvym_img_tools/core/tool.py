@@ -101,6 +101,22 @@ class Tool(ABC):
         """
         return sorted(self.model_loaders())
 
+    def warmup(self, ctx: "Context") -> None:
+        """Optionally run one cheap inference at startup. Default: do nothing.
+
+        Loading weights is not the same as being ready. CUDA kernels, and
+        libraries like spconv that compile or select algorithms on first use,
+        are initialised by the first *real* forward pass — so a worker can hold
+        warm models and still make the next request pay tens of seconds.
+
+        Measured: the `mesh` tool reported "warm" and then took ~57s on the
+        first job and 4.1s on the second. This hook exists to move that cost to
+        worker startup, where it is paid once and invisibly.
+
+        Deliberately not part of the keepalive ping, which fires every few
+        seconds and must stay free.
+        """
+
     def cache_key_parts(self, req: BaseModel) -> list[bytes]:
         """Bytes identifying this request for the result cache.
 

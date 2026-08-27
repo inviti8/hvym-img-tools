@@ -113,3 +113,89 @@ def test_same_request_is_a_stable_key():
     a = tool.cache_key_parts(MeshInput(image=b"same", target_faces=20_000, seed=0))
     b = tool.cache_key_parts(MeshInput(image=b"same", target_faces=20_000, seed=0))
     assert a == b
+
+
+# --- kernel warm-up --------------------------------------------------------
+# Loading weights is not the same as being ready. On the live endpoint a worker
+# with warm models still took ~57s on its first real job and 4.1s on the next;
+# that 14x cliff is kernel initialisation, and it belongs at worker startup.
+
+
+@pytest.fixture
+def registered_backbone():
+    """Swap the 'trellis' factory, then put the real one back.
+
+    register_backbone mutates a module-level dict, so without this a test would
+    leave a fake wired in for everything that ran after it.
+    """
+    from hvym_img_tools import backbones
+
+    saved = dict(backbones._BACKBONES)
+    calls: list[int] = []
+
+    def install(reconstruct):
+        class _B:
+            # The registry calls factory(model), so the signature must take one.
+            def __init__(self, model):
+                self.model = model
+
+            def reconstruct(self, image, *, seed: int = 0, **kw):
+                calls.append(seed)
+                return reconstruct(image, seed)
+
+        backbones.register_backbone("trellis", _B)
+        return calls
+
+    yield install
+    backbones._BACKBONES.clear()
+    backbones._BACKBONES.update(saved)
+
+
+class _Models:
+    def get(self, key):
+        return object()
+
+
+def _ctx():
+    from hvym_img_tools.core.tool import Context
+
+    return Context(models=_Models(), cache=None, workspace=None, config=None)
+
+
+def test_warmup_runs_a_real_reconstruction(registered_backbone):
+    calls = registered_backbone(lambda img, seed: trimesh.creation.icosphere(subdivisions=1))
+    MeshTool().warmup(_ctx())
+    assert calls, "warmup must run a forward pass, not merely load weights"
+
+
+def test_warmup_feeds_something_the_matte_can_find(registered_backbone):
+    """A blank canvas gives the pipeline no foreground; the shape is deliberate."""
+    seen = {}
+
+    def capture(img, seed):
+        seen["extrema"] = img.convert("L").getextrema()
+        return trimesh.creation.icosphere(subdivisions=1)
+
+    registered_backbone(capture)
+    MeshTool().warmup(_ctx())
+    lo, hi = seen["extrema"]
+    assert lo != hi, "warm-up image must not be uniform"
+
+
+def test_warmup_is_optional_on_the_base_contract():
+    """Existing tools must not be forced to implement it."""
+    from hvym_img_tools.tools.reangle.tool import ReangleTool
+
+    assert ReangleTool().warmup(None) is None
+
+
+def test_serverless_swallows_a_failed_warmup():
+    """A worker that cannot warm up must still serve, just slower."""
+    import inspect
+
+    import hvym_img_tools.serverless as sl
+
+    src = inspect.getsource(sl.init)
+    assert "tool.warmup(ctx)" in src
+    warm_block = src[src.index("tool.warmup(ctx)"):]
+    assert "except Exception" in warm_block, "a failed warm-up must not kill the worker"
