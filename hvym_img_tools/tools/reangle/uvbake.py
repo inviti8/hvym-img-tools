@@ -57,25 +57,31 @@ def _splat_mask(points: np.ndarray, size: int, margin: float, radius: int = 2) -
 MIN_SPLAT_POINTS = 40_000
 
 
-def _densify(vertices: np.ndarray, faces: np.ndarray | None, target: int) -> np.ndarray:
-    """Scatter extra points across faces so the splat approximates a silhouette.
+def densify(points: np.ndarray, faces: np.ndarray | None, target: int) -> np.ndarray:
+    """Scatter extra points across faces so a splat approximates a silhouette.
 
     A coarse mesh (a cube has 8 vertices) otherwise scores ~0 IoU on every axis
     and the "best" view becomes arbitrary. Cheap barycentric sampling, no deps.
+
+    Dimension-generic: `points` may be the 3D vertices or any per-vertex 2D
+    attribute sharing their indexing, such as UVs. Anything scoring a mesh
+    against the matte must densify the same way or the two masks are not
+    comparable -- a decimated 20k-face mesh has ~10k vertices, well under
+    `MIN_SPLAT_POINTS`, and splatting those alone understates coverage badly.
     """
-    if faces is None or len(faces) == 0 or len(vertices) >= target:
-        return vertices
+    if faces is None or len(faces) == 0 or len(points) >= target:
+        return points
     per_face = int(np.ceil(target / len(faces)))
     rng = np.random.default_rng(0)  # deterministic: detection must be reproducible
-    tris = vertices[faces]
+    tris = points[faces]
     u = rng.random((len(faces), per_face, 1))
     v = rng.random((len(faces), per_face, 1))
     over = (u + v) > 1
     u = np.where(over, 1 - u, u)
     v = np.where(over, 1 - v, v)
     a, b, c = tris[:, 0:1], tris[:, 1:2], tris[:, 2:3]
-    pts = (a + u * (b - a) + v * (c - a)).reshape(-1, 3)
-    return np.vstack([vertices, pts])
+    pts = (a + u * (b - a) + v * (c - a)).reshape(-1, points.shape[1])
+    return np.vstack([points, pts])
 
 
 def detect_front_view(
@@ -102,7 +108,7 @@ def detect_front_view(
             Image.fromarray(alpha).resize((size, size), Image.BILINEAR)
         )
     silhouette = alpha > 12
-    vertices = _densify(vertices, faces, MIN_SPLAT_POINTS)
+    vertices = densify(vertices, faces, MIN_SPLAT_POINTS)
     best: FrontView | None = None
     for d_axis in range(3):
         others = [i for i in range(3) if i != d_axis]

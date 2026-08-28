@@ -68,10 +68,23 @@ class ModelCache:
             return model
 
     def warm(self, keys: list[str]) -> dict[str, float]:
-        """Preload the given keys. Returns per-key load seconds."""
+        """Preload the given keys. Returns per-key load seconds.
+
+        Failures are logged and skipped, not raised. One image may register
+        loaders for weights it does not carry -- a worker serving TRELLIS still
+        declares TripoSR so `backbone=triposr` stays a live rollback lever --
+        and aborting the whole loop on the first miss left every *other* model
+        cold too, turning a lazy fallback into a slow first request for
+        everything.
+        """
+        times: dict[str, float] = {}
         for key in keys:
-            self.get(key)
-        return {k: self._load_times.get(k, 0.0) for k in keys}
+            try:
+                self.get(key)
+            except Exception:  # noqa: BLE001 - one absent model must not deny the rest
+                log.warning("model %r could not be warmed; leaving it lazy", key, exc_info=True)
+            times[key] = self._load_times.get(key, 0.0)
+        return times
 
     def load_times(self) -> dict[str, float]:
         return dict(self._load_times)

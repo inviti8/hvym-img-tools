@@ -1,4 +1,11 @@
-# hvym-img-tools GPU image.
+# hvym-img-tools TripoSR worker -- the `reangle` rollback target.
+#
+# As of reangle 0.3.0 the shipping backbone is TRELLIS, which lives in
+# docker/Dockerfile.mesh. This image stays exactly as it was, on the wider GPU
+# arch list, so `set_tool_endpoint.sh --remove reangle` puts the tool straight
+# back on TripoSR with no rebuild. It therefore pins HVYM_REANGLE_BACKBONE below:
+# without that, ReangleTool would default to TRELLIS weights this image has never
+# carried and every request would fail on a cold model load.
 #
 # The *light* TripoSR path (AGENTS.md §6): no tiny-cuda-nn, no NeuS, no Wonder3D,
 # no pytorch3d. That collapses the prototype's environment recipe to
@@ -67,6 +74,7 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/models/hf \
     ISNET_PATH=/opt/models/isnet_dis.onnx \
     TRIPOSR_PATH=/opt/TripoSR \
+    HVYM_REANGLE_BACKBONE=triposr \
     HVYM_CACHE_DIR=/cache \
     HVYM_WORKSPACE_DIR=/tmp/hvym \
     HVYM_MODELS_DIR=/opt/models \
@@ -134,11 +142,18 @@ RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /cache /tmp/hvym
 
 # Sanity check at BUILD time: the tool must import and register on a CPU-only
 # builder. Catches a broken package before it ever reaches a GPU worker.
+# The backbone pin is load-bearing, not cosmetic: this image carries TripoSR and
+# no TRELLIS, so it must also *default* to TripoSR or it starts fine and fails
+# every request on a model it cannot load.
 RUN python -c "\
 from hvym_img_tools.core import registry; \
 registry.discover(); \
 assert 'reangle' in registry.names(), registry.names(); \
-print('ok: tools registered ->', registry.names())"
+from hvym_img_tools.tools.reangle.tool import ReangleTool, default_backbone; \
+assert default_backbone() == 'triposr', default_backbone(); \
+needed = ReangleTool().models_needed(); \
+assert needed == ['isnet', 'triposr'], needed; \
+print('ok: tools registered ->', registry.names(), '| reangle warms', needed)"
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

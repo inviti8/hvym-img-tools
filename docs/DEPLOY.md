@@ -33,8 +33,14 @@ and a revocation lever, not an identity boundary.
 
 | Image | Role | Contents |
 |---|---|---|
-| `docker/Dockerfile` | GPU worker | torch, TripoSR, torchmcubes, **weights baked in** |
+| `docker/Dockerfile.mesh` | GPU worker — **`mesh` + `reangle`** | torch 2.4.1/cu124, TRELLIS, kaolin/spconv, isnet, **weights baked in** |
+| `docker/Dockerfile` | GPU worker — `reangle` on TripoSR, the **rollback target** | torch 2.8/cu128, TripoSR, torchmcubes, isnet |
 | `docker/Dockerfile.proxy` | proxy | fastapi + httpx only — no torch, no CUDA |
+
+Since reangle 0.3.0 the TRELLIS image serves **both** tools and the TripoSR image
+exists to roll back to (it pins `HVYM_REANGLE_BACKBONE=triposr`, which its build
+asserts — an image that defaults to weights it does not carry starts fine and
+fails every request).
 
 The GPU image is multi-stage: CUDA `devel` compiles `torchmcubes`, then the wheel
 is copied into a `python:3.10-slim` runtime, so **nvcc never ships**. torch's pip
@@ -84,8 +90,8 @@ The build says nothing, so getting this wrong looks like a working deploy.
 
 | Image | Built for | GPU pools it may be given | Verified |
 |---|---|---|---|
-| `hvym-img-tools` (reangle) | `8.0;8.6;8.9;9.0;12.0+PTX` (torch 2.8/cu128) | `ADA_24`, `AMPERE_24`, `ADA_32_PRO`, `AMPERE_80`, `BLACKWELL_96`, `HOPPER_141` | **yes** — a job pinned to `ADA_32_PRO` ran on an RTX 5090 (sm_120), 45.5 s, HTTP 200 |
-| `hvym-img-mesh` | torch 2.4.1/cu124 + kaolin/spconv wheels, max **sm_90** | `ADA_24`, `AMPERE_24`, `AMPERE_80` | 4090 yes; A100 placement only |
+| `hvym-img-mesh` (**mesh + reangle**) | torch 2.4.1/cu124 + kaolin/spconv wheels, max **sm_90** | `ADA_24`, `AMPERE_24`, `AMPERE_80` | 4090 yes; A100 placement only |
+| `hvym-img-tools` (reangle on TripoSR) | `8.0;8.6;8.9;9.0;12.0+PTX` (torch 2.8/cu128) | `ADA_24`, `AMPERE_24`, `ADA_32_PRO`, `AMPERE_80`, `BLACKWELL_96`, `HOPPER_141` | **yes** — a job pinned to `ADA_32_PRO` ran on an RTX 5090 (sm_120), 45.5 s, HTTP 200 |
 
 **Never give the mesh endpoint a Blackwell pool** (`ADA_32_PRO`, `BLACKWELL_96`,
 `BLACKWELL_180`). Its torch/kaolin/spconv pins top out at sm_90, and 2.4.1+cu124 is
@@ -96,6 +102,28 @@ pin, which is why only it was widened.
 Why it matters: the narrow original list (`8.6;8.9`) left both endpoints on two GPU
 pools in EU-RO-1, and RunPod throttled us for **~9 minutes** waiting on them — a cold
 mesh request measured 547 s wall for 8.7 s of actual work.
+
+**Routing reangle at the TRELLIS endpoint costs it the wider pool.** `spconv`
+publishes no cu128 build and CUDA 12.6 has no sm_120 codegen, so TRELLIS cannot
+follow the reangle image onto Blackwell. That is the real price of the 0.3.0
+backbone swap, and it is the strongest argument for rolling back if throttling
+bites harder than TripoSR's torn geometry did.
+
+### Rolling reangle back to TripoSR
+
+One command. The TripoSR endpoint stays live and untouched precisely for this:
+
+```sh
+scripts/set_tool_endpoint.sh --remove reangle   # back to RUNPOD_ENDPOINT_ID
+scripts/set_tool_endpoint.sh --list             # confirm
+```
+
+No rebuild, no client change, and it restores the wider GPU pool at the same time.
+Rolling forward again is `set_tool_endpoint.sh reangle <trellis-endpoint-id>`.
+
+Two finer-grained levers exist for a worker whose image carries *both* backbones
+(neither shipped image does): `HVYM_REANGLE_BACKBONE=triposr` on the endpoint, or
+`backbone=triposr` per request. Both are covered by tests so they do not rot.
 
 ## RunPod Serverless endpoint
 

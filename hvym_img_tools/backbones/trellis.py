@@ -14,6 +14,11 @@ Costs, measured: 3.7-7.0 s per object plus a one-off ~14.2 s model load, and a
 **16 GB VRAM floor**. Output is 176k-1.2M faces, which callers must decimate.
 
 Every heavy import is inside a function so this module stays CPU-importable.
+
+Input convention: hand it the **matted RGBA** image when you have one. TRELLIS
+uses a supplied alpha channel directly and only runs its own rembg when the
+image is opaque, so preserving our matte both skips a redundant segmentation
+and keeps the silhouette identical to the one reangle's UV bake aligns to.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from typing import Any
 
 from PIL import Image
 
+from ..core.meshops import TARGET_FACES_DEFAULT
 from . import register_backbone
 
 log = logging.getLogger(__name__)
@@ -107,6 +113,22 @@ def load_trellis(device: str) -> Any:
     return pipe
 
 
+def _as_trellis_input(image: Image.Image) -> Image.Image:
+    """RGBA carrying real transparency passes through; anything else → RGB.
+
+    `TrellisImageTo3DPipeline.preprocess_image` treats an RGBA input as
+    already-matted and skips rembg, but only when the alpha is not uniformly
+    opaque. A fully-opaque RGBA would take the rembg branch regardless, so it is
+    converted down rather than left implying an alpha that carries no
+    information.
+    """
+    if image.mode == "RGBA":
+        low, _high = image.getchannel("A").getextrema()
+        if low < 255:
+            return image
+    return image.convert("RGB")
+
+
 class TrellisBackbone:
     """Wraps a warm TRELLIS pipeline as a `Backbone`."""
 
@@ -119,12 +141,18 @@ class TrellisBackbone:
         `seed` is threaded through so a request is reproducible: the result cache
         is content-addressed, and a nondeterministic backbone would make the same
         sketch return a different mesh on a cache miss.
+
+        Surplus keyword arguments are ignored on purpose. `mc_resolution` is one
+        of them: it is TripoSR's marching-cubes grid and means nothing here,
+        because TRELLIS decodes a structured latent rather than extracting an
+        isosurface. Face count is controlled by decimating afterwards
+        (`core.meshops.decimate`), not by a knob on the model.
         """
         import numpy as np
         import torch
         import trimesh
 
-        out = self._pipe.run(image.convert("RGB"), seed=seed, formats=["mesh"])
+        out = self._pipe.run(_as_trellis_input(image), seed=seed, formats=["mesh"])
         meshes = out.get("mesh") or []
         if not meshes:
             raise RuntimeError("TRELLIS returned no mesh")
@@ -136,4 +164,12 @@ class TrellisBackbone:
         return trimesh.Trimesh(vertices=_np(m.vertices), faces=_np(m.faces), process=False)
 
 
-register_backbone("trellis", TrellisBackbone)
+register_backbone(
+    "trellis",
+    TrellisBackbone,
+    model_key=TRELLIS_MODEL_KEY,
+    # 176k-1.2M faces raw, up to 20.8 MB of .glb. At 20k every measured
+    # subject kept 0.994-0.997 of its silhouette at ~0.3 MB, and on the
+    # reangle path decimating 176,724 -> 20,000 cost 0.001 silhouette IoU.
+    default_target_faces=TARGET_FACES_DEFAULT,
+)

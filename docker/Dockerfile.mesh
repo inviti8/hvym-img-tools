@@ -1,8 +1,15 @@
-# hvym-img-tools `mesh` worker -- sketch to an untextured 3D reference.
+# hvym-img-tools TRELLIS worker -- serves BOTH `mesh` and `reangle`.
 #
-# Separate from the reangle image on purpose (docs/tools/mesh.md §5): folding
-# TRELLIS in would lengthen an already ~260s cold start for every reangle
-# request, to serve a tool most requests never call.
+# It began as the mesh-only image. As of reangle 0.3.0 TRELLIS is also reangle's
+# default backbone, so the two tools share one worker and one warm TRELLIS
+# pipeline -- the convergence docs/tools/mesh.md §5 predicted. The image keeps
+# the `hvym-img-mesh` name so the GHCR package and endpoint wiring stay put; the
+# name is now narrower than what the image does.
+#
+# **TripoSR is deliberately NOT here.** Rolling reangle back is done by routing
+# the tool at the old endpoint (`set_tool_endpoint.sh --remove reangle`), which
+# needs no rebuild and also restores the wider GPU pool this image cannot use.
+# The per-request `backbone=triposr` lever only works on an image carrying both.
 #
 # **This image tops out at sm_90 -- never give its endpoint a Blackwell pool**
 # (ADA_32_PRO, BLACKWELL_96, BLACKWELL_180). The reangle image was widened to
@@ -32,6 +39,7 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/models/hf \
     TORCH_HOME=/opt/models/torch \
     TRELLIS_PATH=/opt/TRELLIS \
+    ISNET_PATH=/opt/models/isnet_dis.onnx \
     HVYM_CACHE_DIR=/cache \
     HVYM_WORKSPACE_DIR=/tmp/hvym \
     HVYM_MODELS_DIR=/opt/models \
@@ -78,9 +86,9 @@ RUN pip install "numpy<2" \
 # failed build at a time. Its setup.sh fails silently, so the first attempt
 # missed easydict and died three layers into an import chain.
 #
-# NOTE: plain `onnxruntime` here is correct and does NOT contradict the reangle
-# image's rule about never installing it alongside onnxruntime-gpu -- there is
-# no GPU onnxruntime in this image to shadow, and rembg requires one.
+# rembg needs an onnxruntime, and which one matters now that this image also
+# serves `reangle`, whose isnet matte runs on it. The CPU build goes in here with
+# the rest of TRELLIS's set and is replaced below -- ordering, not preference.
 RUN pip install \
         pillow imageio imageio-ffmpeg tqdm easydict opencv-python-headless \
         scipy rembg onnxruntime open3d pyvista pymeshfix igraph \
@@ -130,6 +138,26 @@ import torch; \
 torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg', pretrained=True); \
 print('ok: DINOv2 cached')" || echo "WARN: DINOv2 not pre-cached; first job will fetch it"
 
+# CPU onnxruntime SHADOWS onnxruntime-gpu and silently sends the matte back to
+# the CPU: 6.4s instead of 0.03s, with no error (docs/BENCHMARK.md §5.2). Install
+# the GPU build last so it wins, and assert the provider is compiled in.
+RUN pip uninstall -y onnxruntime || true \
+    && pip install "onnxruntime-gpu==1.22.0" \
+    && python -c "import onnxruntime as ort; \
+assert 'CUDAExecutionProvider' in ort.get_available_providers(), \
+  'onnxruntime-gpu missing CUDA provider: %s' % ort.get_available_providers(); \
+print('ok: onnxruntime', ort.__version__, ort.get_available_providers())"
+
+# isnet (~176 MB) -- reangle's matte. Its alpha is what TRELLIS reconstructs from
+# and what the UV bake aligns the artist's art to, so both must be the same
+# silhouette. Baked in rather than fetched on a cold worker.
+RUN mkdir -p /opt/models \
+    && curl -fsSL -o ${ISNET_PATH} \
+        https://huggingface.co/stoned0651/isnet_dis.onnx/resolve/main/isnet_dis.onnx \
+    && python -c "size=__import__('os').path.getsize('${ISNET_PATH}'); \
+assert size > 100_000_000, 'isnet download looks truncated: %d bytes' % size; \
+print('ok: isnet', size, 'bytes')"
+
 # --- app -------------------------------------------------------------------
 WORKDIR /app
 COPY hvym_img_tools /app/hvym_img_tools
@@ -157,11 +185,19 @@ assert hasattr(xops.fmha, 'BlockDiagonalMask'), 'compat shim did not take'; \
 from trellis.pipelines import TrellisImageTo3DPipeline; \
 print('ok: TRELLIS imports')"
 
+# Both tools, and reangle must default to the backbone this image actually
+# carries -- an image with no TripoSR that defaulted to TripoSR would start,
+# warm nothing, and fail every request.
 RUN python -c "\
 from hvym_img_tools.core import registry; registry.discover(); \
 names = registry.names(); \
 assert 'mesh' in names, names; \
-print('ok: tools registered ->', names)"
+assert 'reangle' in names, names; \
+from hvym_img_tools.tools.reangle.tool import ReangleTool, default_backbone; \
+assert default_backbone() == 'trellis', default_backbone(); \
+needed = ReangleTool().models_needed(); \
+assert needed == ['isnet', 'trellis'], needed; \
+print('ok: tools registered ->', names, '| reangle warms', needed)"
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
@@ -169,5 +205,5 @@ CMD ["serverless"]
 
 # Last so it never invalidates the expensive layers above.
 LABEL org.opencontainers.image.source="https://github.com/inviti8/hvym-img-tools" \
-      org.opencontainers.image.description="hvym-img-tools mesh worker (TRELLIS) - sketch to untextured 3D reference" \
+      org.opencontainers.image.description="hvym-img-tools TRELLIS worker - mesh (untextured 3D reference) and reangle (style-preserving camera reangle)" \
       org.opencontainers.image.licenses="MIT"

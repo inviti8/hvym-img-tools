@@ -13,10 +13,10 @@ from PIL import Image
 
 from ...core.imageio import (
     DEFAULT_TEXTURE_SIZE,
-    composite_on,
     decode_image,
     isnet_matte,
 )
+from ...core.meshops import decimate
 from . import reconstruct as backbones
 from .uvbake import bake_glb, detect_front_view, front_planar_uv
 
@@ -34,6 +34,9 @@ class ReangleResult:
     faces: int
     silhouette_iou: float
     front_axis: int
+    #: Faces before decimation. Equal to `faces` when nothing was decimated,
+    #: which is the TripoSR path -- its ~31k is already under any sane target.
+    faces_raw: int = 0
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -44,11 +47,20 @@ def run_pipeline(
     backbone: backbones.Backbone,
     mc_resolution: int = backbones.MC_RESOLUTION_DEFAULT,
     texture_size: int = DEFAULT_TEXTURE_SIZE,
+    target_faces: int | None = None,
+    seed: int = 0,
 ) -> ReangleResult:
     """One drawing in, one textured `.glb` out.
 
     Dependencies are injected rather than loaded here so every heavy model comes
     from the shared `ModelCache` and this stays unit-testable with fakes.
+
+    `target_faces` defaults to `None` (no decimation), which is right for
+    TripoSR's ~31k-face depth proxy. A backbone that returns 176k-1.2M faces
+    needs it set -- see `core.meshops.TARGET_FACES_DEFAULT`.
+
+    `seed` matters only for a stochastic backbone. It is threaded through so a
+    content-addressed cache cannot end up promising one mesh and storing another.
     """
     timings: dict[str, float] = {}
 
@@ -67,7 +79,18 @@ def run_pipeline(
         matte = isnet_matte(decode_image(image_bytes, "RGB"), isnet_session, size=texture_size)
 
     with _timed("reconstruct"):
-        mesh = backbone.reconstruct(composite_on(matte.image), mc_resolution=mc_resolution)
+        # The matte goes through as RGBA and each backbone applies its own input
+        # convention (backbones/__init__.py). Compositing onto grey here would
+        # suit TripoSR and silently destroy the alpha TRELLIS reads -- sending it
+        # off to rembg a silhouette the UV bake below will not agree with.
+        mesh = backbone.reconstruct(
+            matte.image, mc_resolution=mc_resolution, seed=seed
+        )
+
+    faces_raw = len(mesh.faces)
+    with _timed("decimate"):
+        # UVs are per-vertex, so this has to happen before the bake, not after.
+        mesh = decimate(mesh, target_faces)
 
     vertices = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces)
@@ -80,8 +103,9 @@ def run_pipeline(
 
     timings["total"] = round(sum(timings.values()), 3)
     log.info(
-        "reangle done in %.3fs (%s) verts=%d faces=%d IoU=%.3f",
-        timings["total"], timings, len(vertices), len(faces), view.silhouette_iou,
+        "reangle done in %.3fs (%s) verts=%d faces=%d (raw %d) IoU=%.3f",
+        timings["total"], timings, len(vertices), len(faces), faces_raw,
+        view.silhouette_iou,
     )
     return ReangleResult(
         glb=glb,
@@ -90,6 +114,7 @@ def run_pipeline(
         faces=len(faces),
         silhouette_iou=round(view.silhouette_iou, 4),
         front_axis=view.d_axis,
+        faces_raw=faces_raw,
         timings=timings,
     )
 

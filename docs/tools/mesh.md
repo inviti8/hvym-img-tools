@@ -140,10 +140,14 @@ The **16 GB VRAM floor** narrows the GPU tier: the current endpoint's 4090/L4
 The proxy needs a tool→endpoint map instead of a single `RUNPOD_ENDPOINT_ID` —
 the same change `hallucinate.md` identified.
 
-**Expect convergence.** TRELLIS handles characters well, so it is a strong
-candidate to replace TripoSR in `reangle` too (`ReangleInput` already has a
-`backbone` field). If that happens, the two tools collapse onto one image and the
-separate endpoint goes away. Do not over-invest in keeping them apart.
+**Convergence happened.** As of reangle 0.3.0 TRELLIS is *also* reangle's default
+backbone, so this image serves both tools and one warm TRELLIS pipeline serves
+both (`backbones.warm_kernels` dedupes the startup pass by model key). The
+evidence for the swap is docs/BENCHMARK.md §6d; the image gained isnet and
+`onnxruntime-gpu` for reangle's matte and nothing else.
+
+The reangle image and endpoint stay live and untouched as the rollback target —
+`set_tool_endpoint.sh --remove reangle` is the whole procedure.
 
 ## 6. Supporting the library
 

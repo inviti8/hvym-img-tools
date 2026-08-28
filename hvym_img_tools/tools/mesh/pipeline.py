@@ -12,14 +12,13 @@ from dataclasses import dataclass, field
 
 from ...backbones import Backbone
 from ...core.imageio import decode_image
+from ...core.meshops import TARGET_FACES_DEFAULT, decimate  # noqa: F401 - re-exported
 
 log = logging.getLogger(__name__)
 
-#: Raw TRELLIS output is 176k-1.2M faces (up to 20.8 MB of .glb), which is not a
-#: shippable payload. Measured: at 20k every test subject lands at ~0.3 MB while
-#: keeping 0.994-0.997 of its silhouette -- smaller than a reangle result, which
-#: matters for a tool whose point is accumulating a library.
-TARGET_FACES_DEFAULT = 20_000
+# TARGET_FACES_DEFAULT and the decimation itself moved to `core.meshops` once
+# reangle needed them too -- a tool must not import another tool (AGENTS.md
+# §2, §7). Re-exported here so this module's callers and tests are unchanged.
 
 
 @dataclass(slots=True)
@@ -28,16 +27,6 @@ class MeshResult:
     faces_raw: int
     faces_out: int
     timings: dict[str, float] = field(default_factory=dict)
-
-
-def _decimate(mesh, target_faces: int):
-    """Quadric decimation, tolerant of trimesh's signature change across majors."""
-    if len(mesh.faces) <= target_faces:
-        return mesh
-    try:
-        return mesh.simplify_quadric_decimation(face_count=target_faces)
-    except TypeError:  # trimesh < 4 took a positional count
-        return mesh.simplify_quadric_decimation(target_faces)
 
 
 def run_pipeline(
@@ -70,7 +59,7 @@ def run_pipeline(
 
     faces_raw = len(mesh.faces)
     with _timed("decimate"):
-        mesh = _decimate(mesh, target_faces)
+        mesh = decimate(mesh, target_faces)
 
     with _timed("export"):
         glb = mesh.export(file_type="glb")

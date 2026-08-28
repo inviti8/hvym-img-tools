@@ -18,9 +18,12 @@ from PIL import Image
 from ...backbones import (  # noqa: F401 - re-exported for callers
     Backbone,
     backbone_names,
+    default_target_faces_for,
     get_backbone,
+    model_key_for,
     register_backbone,
 )
+from ...core.imageio import composite_on
 
 log = logging.getLogger(__name__)
 
@@ -85,15 +88,41 @@ def load_triposr(device: str) -> Any:
     return model
 
 
+def _as_triposr_input(image: Image.Image) -> Image.Image:
+    """RGBA matte → RGB flattened onto 0.5 grey; RGB passes through.
+
+    TripoSR's `run.py` convention. It lives here rather than in the pipeline so
+    the caller can hand every backbone the same matted RGBA and let each adapt
+    -- TRELLIS wants the opposite (see backbones/__init__.py).
+    """
+    return composite_on(image) if image.mode == "RGBA" else image
+
+
 class TripoSRBackbone:
     """Wraps a warm TripoSR model as a `Backbone`."""
 
     def __init__(self, model: Any) -> None:
         self._model = model
 
-    def reconstruct(self, image: Image.Image, *, mc_resolution: int = MC_RESOLUTION_DEFAULT) -> Any:
+    def reconstruct(
+        self,
+        image: Image.Image,
+        *,
+        mc_resolution: int = MC_RESOLUTION_DEFAULT,
+        **_: Any,
+    ) -> Any:
+        """RGBA (preferred) or RGB in → `trimesh.Trimesh`.
+
+        TripoSR wants RGB flattened onto 0.5 grey (its `run.py` convention), so
+        the composite happens *here*. Callers pass the matte and each backbone
+        adapts, because TRELLIS wants the opposite — see backbones/__init__.py.
+
+        Surplus keywords (`seed`, `target_faces`) are ignored: TripoSR is
+        deterministic and decimation is the pipeline's job.
+        """
         import torch
 
+        image = _as_triposr_input(image)
         device = next(self._model.parameters()).device
         with torch.no_grad():
             scene_codes = self._model([image], device=device)
@@ -103,4 +132,11 @@ class TripoSRBackbone:
         return meshes[0]
 
 
-register_backbone("triposr", TripoSRBackbone)
+register_backbone(
+    "triposr",
+    TripoSRBackbone,
+    model_key=TRIPOSR_MODEL_KEY,
+    # ~30k faces: a depth proxy that wants no cap. Capping it would
+    # change the output of a path that has shipped since 0.1.0.
+    default_target_faces=None,
+)

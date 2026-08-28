@@ -336,6 +336,60 @@ Full write-up and images: [`benchmark/paint3d/FINDINGS.md`](benchmark/paint3d/FI
 
 ---
 
+## 6d. TRELLIS as reangle's backbone — measured
+
+**The swap shipped in reangle 0.3.0.** Every number here comes from baking the
+same character drawing through the same pipeline, scoring the *delivered* `.glb`
+by splatting its UVs back onto the isnet matte. TRELLIS meshes came from the live
+`/tools/mesh` endpoint; the bake and scoring ran locally through
+`scripts/trellis_reangle_probe.py`.
+
+| mesh | faces | silhouette IoU | best case ¹ | width ÷ height |
+|---|---|---|---|---|
+| **TripoSR** | 29,887 | **0.772** | 0.857 | 0.271 |
+| **TRELLIS**, 20k | 20,000 | **0.675** | 0.738 | 0.296 |
+| TRELLIS, undecimated | 176,724 | 0.674 | — | 0.296 |
+| TRELLIS, fed the isnet matte | 20,000 | 0.665 | — | 0.299 |
+
+¹ after a scale/offset search — i.e. the most any pure reframing could recover.
+
+**The number favours TripoSR; the picture favours TRELLIS.** TripoSR tears: its
+ponytail smears into a wedge at every angle, its arm boundaries come back ragged,
+and the face degrades badly by +20°. TRELLIS returns coherent hair and intact
+limbs, at the cost of a smear under the chin at +20°.
+
+IoU measures whether the outline matches. It does not measure whether the mesh is
+*intact*, and a torn mesh is what produces the smears an artist actually sees.
+That is why the swap went ahead on a 12.6% worse score.
+
+### Three explanations for the gap, all tested and discarded
+
+1. **Detached fragments inflating the bounding box.** TRELLIS returns 8 components
+   to TripoSR's 3. Keeping only the largest (95.96% of faces) moved IoU
+   0.6748 → 0.6744. Nothing.
+2. **Framing.** A scale/offset search lifts both (0.738 / 0.857). The ranking does
+   not change, and TRELLIS's *ceiling* stays below TripoSR's shipping score.
+3. **A different silhouette.** Feeding TRELLIS the isnet matte instead of the raw
+   drawing scored 0.6647 — marginally worse. The input-convention fix
+   (backbones/__init__.py) is still correct; it does not buy alignment.
+
+The cause is proportion: TRELLIS builds a fuller body than the drawn figure. That
+shows up as a one-sided halo down the flank, not as misplaced art.
+
+### Settled along the way
+
+- **Decimation is free.** 176,724 → 20,000 faces costs 0.001 IoU, and the
+  delivered `.glb` is *smaller* than TripoSR's (490 KB vs 703 KB).
+- **Front detection is genuinely backbone-agnostic.** It found TRELLIS's own
+  convention unprompted — depth on **Y** (plane X,Z) where TripoSR is depth on
+  **X** (plane Y,Z). No hard-coding was needed, which is exactly why §5.5 built
+  it that way.
+- **Untested lever.** `fit_to_frame` normalises by the *mesh's* bounding box.
+  Fitting to the *matte's* silhouette box would align width and height
+  independently and the scale search suggests most of the gap is reachable —
+  but §5.6 records per-axis normalisation destroying alignment once before, so
+  it needs measuring rather than assuming.
+
 ## 7. Reproducing
 
 ```sh

@@ -19,8 +19,15 @@ Content-Type: multipart/form-data
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `image` | file | *required* | Character drawing, any size or background. Max **32 MB** |
-| `mc_resolution` | int 64–512 | `256` | Marching-cubes grid — the main cost/quality lever |
-| `backbone` | str | `triposr` | Reconstruction backbone |
+| `mc_resolution` | int 64–512 | `256` | Marching-cubes grid. **TripoSR only** — TRELLIS ignores it |
+| `backbone` | str | `trellis` | `trellis` (sounder geometry) or `triposr` (tighter silhouette) |
+| `target_faces` | int 2 000–200 000 | *backbone's own* | Decimation target. Unset: TRELLIS caps at 20 000, TripoSR is uncapped |
+| `seed` | int 0–2³¹-1 | `0` | Only TRELLIS is stochastic. Fixed so results stay cacheable |
+
+**The default backbone changed in reangle 0.3.0** (was `triposr`). Results are
+cached by `sha256(image + params + tool version)`, and the version bump means no
+0.2.0 result is served for a 0.3.0 request — the first call per drawing is a miss.
+A worker rejects a backbone it has no weights for rather than substituting one.
 
 Auth accepts either `X-API-Key: <key>` or `Authorization: Bearer <key>`. Keys are
 compared in constant time; minimum length 16.

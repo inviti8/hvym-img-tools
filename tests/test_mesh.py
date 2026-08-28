@@ -130,7 +130,11 @@ def registered_backbone():
     """
     from hvym_img_tools import backbones
 
-    saved = dict(backbones._BACKBONES)
+    saved = (dict(backbones._BACKBONES), dict(backbones._MODEL_KEYS),
+             dict(backbones._TARGET_FACES))
+    # warm_kernels dedupes by model key for the life of the process, so without
+    # clearing it the second test in a run silently gets no warm-up at all.
+    backbones._KERNELS_WARMED.clear()
     calls: list[int] = []
 
     def install(reconstruct):
@@ -147,8 +151,14 @@ def registered_backbone():
         return calls
 
     yield install
-    backbones._BACKBONES.clear()
-    backbones._BACKBONES.update(saved)
+    # Restore every dict register_backbone writes. Missing _TARGET_FACES left a
+    # stub's `None` behind and quietly uncapped TRELLIS for the rest of the run.
+    for live, original in zip(
+        (backbones._BACKBONES, backbones._MODEL_KEYS, backbones._TARGET_FACES), saved
+    ):
+        live.clear()
+        live.update(original)
+    backbones._KERNELS_WARMED.clear()
 
 
 class _Models:
@@ -182,11 +192,33 @@ def test_warmup_feeds_something_the_matte_can_find(registered_backbone):
     assert lo != hi, "warm-up image must not be uniform"
 
 
-def test_warmup_is_optional_on_the_base_contract():
-    """Existing tools must not be forced to implement it."""
-    from hvym_img_tools.tools.reangle.tool import ReangleTool
+def test_kernel_warmup_runs_once_per_model_not_once_per_tool(registered_backbone):
+    """reangle and mesh share one TRELLIS pipeline; the startup pass is ~4s of
+    GPU work and there is no reason to pay it twice."""
+    calls = registered_backbone(lambda img, seed: trimesh.creation.icosphere(subdivisions=1))
+    MeshTool().warmup(_ctx())
+    MeshTool().warmup(_ctx())
+    assert len(calls) == 1, f"expected one warm-up, got {len(calls)}"
 
-    assert ReangleTool().warmup(None) is None
+
+def test_warmup_is_optional_on_the_base_contract():
+    """A tool with no kernels to initialise must not be forced to implement it.
+
+    Both shipped tools now do (they share TRELLIS), so this checks the contract
+    itself rather than borrowing whichever tool happened not to override it.
+    """
+    from hvym_img_tools.core.tool import MediaResponse, Tool
+
+    class _Bare(Tool):
+        name = "bare"
+        summary = "does nothing"
+        InputModel = MeshInput
+        OutputModel = MediaResponse
+
+        def run(self, req, ctx):  # pragma: no cover - never called
+            raise NotImplementedError
+
+    assert _Bare().warmup(None) is None
 
 
 def test_serverless_swallows_a_failed_warmup():
