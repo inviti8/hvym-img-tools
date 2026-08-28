@@ -3,71 +3,110 @@
 **Question:** TRELLIS already decodes an appearance from the artist's drawing and
 `reconstruct` throws it away (`formats=["mesh"]`). Is it worth having?
 
-**Answer: not on the style path. Possibly for props — the test could not tell,
-for a reason that is our fault and is fixable.**
+**Answer: not for reangle. Yes, plausibly, for props.**
 
-Run 2026-08-28 on an isolated probe endpoint (`hvym-img-mesh:0.5.0-probe`,
+Run 2026-08-28 on an isolated probe endpoint (`hvym-img-mesh:0.5.x-probe`,
 created and destroyed for this; production was never touched). Subject is
 [`../paint3d/source_drawing.png`](../paint3d/source_drawing.png), the same
 drawing every other benchmark here uses.
 
-## The images
+## Read this first: the first probe's diagnosis was wrong
+
+The first run came back with **no face at all**, and this file originally
+recorded that as a resolution problem — the colour field at `res=256` resolving
+31 layers across a head the atlas gave 237 texel rows. That reasoning was
+plausible, quantified, and **wrong**.
+
+Fetching the raw cloud made the bake free to re-run, and the sweep settled it:
+
+| what was varied | effect on the face |
+|---|---|
+| field resolution, 256 → 4096 | **none** |
+| texture size, 1024 → 4096 | **none** |
+| surface samples, 2M → 8M | **none** |
+| **voxel shape, anisotropic → cubic** | **the face comes back** |
+
+`anisotropy_isolated.png` is the isolation: same resolution, same texture, same
+sample count, only the voxel shape differs. Left is a featureless blob, right
+has eyes, brows, nose and mouth.
+
+**The bug was voxel anisotropy.** `ColorField` normalised each axis
+independently, so a figure measuring 1.0 × 0.293 × 0.227 got voxels **3.4×
+taller than they were wide**. Horizontal features — eyes, mouth, the line of a
+collar — were averaged across vertically while the horizontal axis was
+*over*-sampled. Every reangle subject is a standing figure with roughly those
+proportions, so this would have hit all of them.
+
+A caution for anyone extending this: **the sharpness metric scored the broken
+bake higher than the fixed one** (39.0 against 35.8). Laplacian variance rewards
+the blocky noise anisotropy produces. `resolution_sweep.png` carries those
+numbers and they are worth nothing; the images decided this, not the metric.
+
+## What the fixed bake looks like
+
+`style_zoom_fixed.png` — the drawing, reangle's projection, the first probe, and
+the fixed bake, side by side.
+
+The face is **recognisably the character**, and much softer than the drawing.
+That softness is now understood and is not fixable by tuning:
+
+| | |
+|---|---|
+| gaussians in the cloud | 133,792 |
+| on the head | 17,946 (13.4%) |
+| head gaussian spacing | 0.00217 |
+| **gaussians across the head, top to bottom** | **~54** |
+| texel rows the atlas gives that head | 237 at 1024px, 474 at 2048px |
+
+**~54 colour samples have to fill 237+ texel rows.** That is TRELLIS's own
+output density, not a sampler artefact, and it is why field resolution above
+~460 does nothing: past that, each gaussian simply gets its own voxel and no new
+information enters.
+
+## Verdicts
+
+**reangle: unchanged.**
+[`uvbake.py`](../../../hvym_img_tools/tools/reangle/uvbake.py) §7.4 — never put
+the backbone's predicted texture on the style path — **stands.** The projection
+reproduces the artist's exact pixels; the bake reconstructs them from ~54
+samples across a face. Even a perfect bake would be a reconstruction, so no
+amount of sampler work changes this verdict.
+
+**Props: promising, and the reason to keep this code.**
+`gaussian_turntable_fixed.png` shows full 360° coverage with no holes, no
+seams, and clothing and boots that read correctly from every angle. Nothing in
+the props case has a face, so the one measured weakness does not apply — and it
+costs no second model, no extra weights, and no licence compromise, which is
+exactly what [`../../tools/hallucinate.md`](../../tools/hallucinate.md) §4 and §6
+were struggling with.
+
+## Files
 
 | file | what it shows |
 |---|---|
-| **`style_zoom.png`** | **the decisive one.** Head and torso: the drawing, reangle's front projection, the gaussian bake. |
-| `gaussian_turntable.png` | full 360°, 45° steps. 0° is the back, 180° the front. |
-| `gaussian_atlas.png` | the two atlases. Left the xatlas 360° layout, right reangle's — which is just the drawing. |
-| `gaussian_vs_projection.png` | both paths across ±40°, the window reangle is specified for. |
-| `mesh_gaussian_probe.glb` | what the endpoint returned. 20k faces, 13,539 verts, 1024² texture, 1.33 MB. |
+| `anisotropy_isolated.png` | **the decisive one.** Anisotropic vs cubic voxels, everything else held fixed. |
+| `style_zoom_fixed.png` | drawing / projection / first probe / fixed bake. |
+| `gaussian_turntable_fixed.png` | 360°, 45° steps, cubic bake. 180° is the front. |
+| `resolution_sweep.png` | field resolution 256–4096. Flat, which is the point. |
+| `style_zoom.png`, `gaussian_turntable.png`, `gaussian_vs_projection.png`, `gaussian_atlas.png` | the first probe, kept as the record of the wrong answer. |
+| `appearance.npz` | the raw cloud + mesh, 2.4 MB. **Re-bake offline from this; do not spend another cold start.** |
+| `mesh_gaussian_fixed.glb` / `mesh_gaussian_probe.glb` | fixed and original bakes. |
 
-## What it settles
+## Cost, and the lesson about it
 
-**The face does not survive.** `style_zoom.png` is the whole argument: the front
-projection keeps the eyes, mouth, collar ruffle and shirt logo because those
-*are* the artist's pixels; the gaussian bake has a blank mottled surface where
-the face should be, a blocky ponytail, and the logo as a smear.
-
-So [`uvbake.py`](../../../hvym_img_tools/tools/reangle/uvbake.py) §7.4 — never
-put the backbone's predicted texture on the style path — is **confirmed, not
-narrowed.** This was run to re-examine that rule and the rule won.
-
-**The 360° coverage is real.** No holes, no black gutters, no seams; the body,
-clothing and boots read correctly from every angle. For props and set dressing,
-where nothing has a face, that is what `hallucinate` wanted — from the artist's
-own drawing, with no second model, no extra weights, and no licence cost.
-
-## What it does NOT settle, and why
-
-The mush is at least partly the sampler's, not TRELLIS's. Measured:
-
-| | head's share of atlas | texels for the head |
+| run | queue | work |
 |---|---|---|
-| gaussian bake (xatlas 360°, 1024²) | 5.36% | ~237 × 237 |
-| reangle (front planar, 2048²) | 3.67% | ~392 × 392 |
+| first probe (`texture="gaussian"`) | 3,150 s | 22.8 s |
+| cloud fetch (`texture="cloud"`) | 294 s | 6.1 s |
 
-237² is ample for a recognisable face, so the atlas was not the constraint.
-**`ColorField` was.** At `res=256` over a figure whose long axis is 1.0 the voxel
-edge is 0.0039, so a 0.12-tall head spans **31 voxel layers** — 237 texel rows
-fed from 31 distinct values, a **7.7× under-resolution**. Matching them needs
-`res ≈ 2048`, which is nearly free because the field is sparse: its cost scales
-with the number of gaussians, not with res³.
+The first run bought exactly one answer about one configuration, and that answer
+was wrong. The second brought back the cloud, after which resolution, texture
+size, sample count and voxel shape were all tested locally for free — and the
+real cause turned up in the variable nobody had suspected.
 
-**So this run does not measure TRELLIS's appearance fidelity.** It measures a
-badly chosen default. The face verdict stands regardless — even a perfect bake
-reconstructs the face rather than reproducing it — but "how good is TRELLIS's
-texture really" is still open.
+**Fetch the cloud first.** `texture="cloud"` exists for this.
 
-To answer it, one more round trip should **return the raw gaussian cloud**
-alongside the glb, so every subsequent bake iteration is local and free instead
-of costing a cold start.
-
-## Cost
-
-**22.8 s of work behind a 3,150 s queue.** The probe endpoint had no network
-volume (deliberately — so it could not write into the cache production reads
-from), so nothing was warm and the 6.5 GB image was pulled from scratch. Do not
-read the 52 minutes as a property of the feature.
-
-Gaussian decode + xatlas unwrap + bake costs ~18 s on top of the ~5 s mesh-only
-path.
+Incidental confirmations from the cloud, both previously assumed: the SH
+convention is right (`sh_in_range` 0.9999 against 0.589 read raw), and the mesh
+and gaussian share a coordinate frame (extents `[0.293, 0.23, 1.0]` and
+`[0.288, 0.227, 0.996]`).
