@@ -93,13 +93,40 @@ def test_coarse_levels_answer_what_the_fine_level_cannot():
     rng = np.random.default_rng(1)
     q = rng.random((500, 3))
 
-    single = ColorField(xyz, rgb, levels=(256,))
-    default = ColorField(xyz, rgb)
+    field = ColorField(xyz, rgb, resolution=256)
+    # A sparse cloud on a fine grid misses most queries at the finest level...
+    fine_dims = field._levels[0][1]
+    fine_keys = field._levels[0][2]
+    hits = np.isin(field._keys(q, fine_dims), fine_keys)
+    assert hits.mean() < 0.5
+    # ...and the field as a whole still answers every one of them.
+    assert field.sample(q)[1].all(), "the res=1 level makes a miss impossible"
 
-    # A sparse cloud on a fine grid misses most queries...
-    assert single.sample(q)[1].mean() < 0.5
-    # ...and the shipped field answers every one of them.
-    assert default.sample(q)[1].all(), "the res=1 level makes a miss impossible"
+
+def test_levels_descend_to_a_single_voxel():
+    """The coarsest level must span the cloud, or a corner query can come back black."""
+    xyz, rgb = _split_cloud(n=1_000)
+    field = ColorField(xyz, rgb, resolution=256)
+    resolutions = [r for r, _, _, _ in field._levels]
+    assert resolutions[0] == 256
+    assert resolutions[-1] == 1, resolutions
+    assert resolutions == sorted(resolutions, reverse=True)
+
+
+def test_voxels_are_cubic_not_axis_normalised():
+    """A tall thin subject must not get tall thin voxels.
+
+    Normalising each axis independently would make the resolution that suits a
+    figure's height over-blur its width -- exactly the regime reangle works in,
+    where subjects are ~1.0 tall and ~0.3 wide.
+    """
+    rng = np.random.default_rng(0)
+    xyz = rng.random((20_000, 3)) * np.array([0.3, 0.2, 1.0])
+    rgb = np.zeros((len(xyz), 3), np.float32)
+    field = ColorField(xyz, rgb, resolution=100)
+    dims = field._levels[0][1]
+    edges = field._span / dims
+    assert np.allclose(edges, edges[0], rtol=0.05), f"non-cubic voxels: {edges}"
 
 
 def test_points_outside_the_cloud_are_clamped_not_crashed():
@@ -284,3 +311,95 @@ def test_a_geometry_only_backbone_says_so_clearly():
     _Image.new("RGB", (64, 64), (200, 200, 200)).save(buf, format="PNG")
     with pytest.raises(RuntimeError, match="appearance"):
         run_pipeline(buf.getvalue(), backbone=GeometryOnly(), texture="gaussian")
+
+
+# --- the derived resolution, and the round trip -----------------------------
+
+def test_resolution_is_derived_from_the_atlas_not_guessed():
+    """The whole point: a figure's head must get voxels as fine as its texels.
+
+    The first probe fixed this at 256 and under-resolved a head 7.7x. On the
+    same geometry the derived value has to land far above that.
+    """
+    from hvym_img_tools.core.gsbake import texel_matched_resolution
+
+    # a tall thin subject, like every reangle subject
+    mesh = trimesh.creation.cylinder(radius=0.15, height=1.0, sections=64)
+    v, f = np.asarray(mesh.vertices), np.asarray(mesh.faces)
+    uv = mesh.unwrap().visual.uv
+    m2 = mesh.unwrap()
+    res = texel_matched_resolution(np.asarray(m2.vertices), np.asarray(m2.faces),
+                                   np.asarray(m2.visual.uv), 1024)
+    assert res > 256, f"derived resolution {res} is no better than the bad default"
+    assert res <= 4096
+
+
+def test_resolution_scales_with_texture_size():
+    """Doubling the atlas halves the texel edge, so the field must get finer."""
+    from hvym_img_tools.core.gsbake import texel_matched_resolution
+
+    m = trimesh.creation.icosphere(subdivisions=3).unwrap()
+    v, f, uv = (np.asarray(m.vertices), np.asarray(m.faces), np.asarray(m.visual.uv))
+    small = texel_matched_resolution(v, f, uv, 512)
+    large = texel_matched_resolution(v, f, uv, 2048)
+    assert large > small, f"{large} should exceed {small}"
+
+
+def test_finer_field_resolves_detail_a_coarse_one_averages_away():
+    """The actual claim behind the re-run, on a cloud with known fine structure."""
+    rng = np.random.default_rng(0)
+    xyz = rng.random((300_000, 3))
+    # 40 stripes along x -- far finer than a res=8 field can represent
+    stripe = (xyz[:, 0] * 40).astype(int) % 2
+    rgb = np.where(stripe[:, None] == 0, [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]).astype(np.float32)
+
+    q = np.stack([np.linspace(0.01, 0.99, 400), np.full(400, 0.5), np.full(400, 0.5)], 1)
+    coarse, _ = ColorField(xyz, rgb, resolution=8).sample(q)
+    fine, _ = ColorField(xyz, rgb, resolution=256).sample(q)
+
+    # contrast survives at high resolution and is averaged to mud at low
+    assert fine[:, 0].std() > 3 * coarse[:, 0].std()
+
+
+def test_cloud_round_trips_through_npz_with_its_mesh():
+    """Offline iteration is the point; losing the mesh would defeat it."""
+    rng = np.random.default_rng(0)
+    cloud = GaussianCloud(
+        xyz=rng.random((500, 3)),
+        features_dc=rng.normal(0, 0.5, (500, 3)),
+        opacity=rng.random(500).astype(np.float32),
+    )
+    m = trimesh.creation.icosphere(subdivisions=2)
+    blob = cloud.to_npz(m.vertices, m.faces)
+
+    back, verts, faces = GaussianCloud.from_npz(blob)
+    assert len(back) == 500
+    assert np.allclose(back.xyz, cloud.xyz, atol=1e-6)
+    assert verts is not None and faces is not None
+    assert len(verts) == len(m.vertices) and len(faces) == len(m.faces)
+    # float16 colour is a deliberate size trade, so allow its precision
+    assert np.allclose(back.features_dc, cloud.features_dc, atol=1e-2)
+
+
+def test_cloud_npz_without_a_mesh_is_still_readable():
+    cloud = GaussianCloud(
+        xyz=np.zeros((4, 3)), features_dc=np.zeros((4, 3)), opacity=np.ones(4)
+    )
+    back, verts, faces = GaussianCloud.from_npz(cloud.to_npz())
+    assert len(back) == 4 and verts is None and faces is None
+
+
+def test_cloud_mode_returns_an_npz_not_a_glb():
+    import io as _io
+
+    from PIL import Image as _Image
+
+    from hvym_img_tools.tools.mesh.pipeline import run_pipeline
+
+    buf = _io.BytesIO()
+    _Image.new("RGB", (64, 64), (200, 200, 200)).save(buf, format="PNG")
+    result = run_pipeline(buf.getvalue(), backbone=AppearanceBackbone(),
+                          target_faces=2_000, texture="cloud")
+    assert result.glb[:4] != b"glTF"
+    back, verts, faces = GaussianCloud.from_npz(result.glb)
+    assert len(back) > 0 and verts is not None and faces is not None

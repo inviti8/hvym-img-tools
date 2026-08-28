@@ -34,14 +34,14 @@ class MeshResult:
     coverage: float = 0.0
 
 
-def _texture_from_gaussian(mesh, cloud, texture_size: int):
+def _texture_from_gaussian(mesh, cloud, texture_size: int, resolution: int | None):
     """Unwrap, then carry the Gaussian's colour onto the atlas.
 
     Unwrap *after* decimation: xatlas charts the faces it is given, so charting
     a 176k-face mesh and then throwing 89% of it away would waste the work and
     leave a shredded atlas.
     """
-    from ...core.gsbake import bake_texture
+    from ...core.gsbake import bake_texture, texel_matched_resolution
     from ...core.meshops import textured_glb
 
     unwrapped = mesh.unwrap()  # xatlas; splits vertices along seams
@@ -49,7 +49,15 @@ def _texture_from_gaussian(mesh, cloud, texture_size: int):
     verts = np.asarray(unwrapped.vertices, float)
     faces = np.asarray(unwrapped.faces)
 
-    rgb, coverage = bake_texture(verts, faces, uv, cloud.field(), size=texture_size)
+    # Derived from the atlas the unwrap actually produced, not guessed. A fixed
+    # default is what made the first probe unreadable.
+    if resolution is None:
+        resolution = texel_matched_resolution(verts, faces, uv, texture_size)
+    log.info("gaussian bake: %d gaussians, colour field at res=%d for a %dpx atlas",
+             len(cloud), resolution, texture_size)
+
+    field = cloud.field(resolution=resolution)
+    rgb, coverage = bake_texture(verts, faces, uv, field, size=texture_size)
     art = Image.fromarray(rgb, "RGB")
     return textured_glb(verts, faces, uv, art), coverage
 
@@ -62,6 +70,7 @@ def run_pipeline(
     seed: int = 0,
     texture: str = "none",
     texture_size: int = 1024,
+    field_resolution: int | None = None,
 ) -> MeshResult:
     """One sketch in, one untextured `.glb` out.
 
@@ -83,11 +92,12 @@ def run_pipeline(
 
     image = decode_image(image_bytes, "RGB")
     cloud = None
+    wants_appearance = texture in ("gaussian", "cloud")
     with _timed("reconstruct"):
-        if texture == "gaussian":
+        if wants_appearance:
             if not hasattr(backbone, "reconstruct_appearance"):
                 raise RuntimeError(
-                    f"texture='gaussian' needs a backbone that decodes appearance; "
+                    f"texture={texture!r} needs a backbone that decodes appearance; "
                     f"{type(backbone).__name__} only reconstructs geometry."
                 )
             mesh, cloud = backbone.reconstruct_appearance(image, seed=seed)
@@ -100,8 +110,13 @@ def run_pipeline(
 
     coverage = 0.0
     with _timed("export"):
-        if cloud is not None:
-            glb, coverage = _texture_from_gaussian(mesh, cloud, texture_size)
+        if texture == "cloud":
+            # The raw appearance, so the bake can be re-run offline at any
+            # resolution without paying another cold start.
+            glb = cloud.to_npz(mesh.vertices, mesh.faces)
+        elif cloud is not None:
+            glb, coverage = _texture_from_gaussian(
+                mesh, cloud, texture_size, field_resolution)
         else:
             glb = mesh.export(file_type="glb")
             if not isinstance(glb, bytes):  # trimesh may hand back a buffer

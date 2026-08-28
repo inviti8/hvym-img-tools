@@ -62,6 +62,50 @@ class GaussianCloud:
         return ColorField(self.xyz, gaussian_rgb(self.features_dc, apply_sh=apply_sh),
                           self.opacity, **kwargs)
 
+    def to_npz(self, vertices: np.ndarray | None = None,
+               faces: np.ndarray | None = None) -> bytes:
+        """Serialise for offline iteration, so re-baking never needs the GPU.
+
+        The first probe cost a 3,150 s cold start to answer one question about
+        one resolution. Handing the cloud back means every later question about
+        the bake is answered locally and free.
+
+        The mesh travels with it. Without vertices and faces the cloud cannot be
+        unwrapped or baked offline, which would defeat the entire point.
+
+        float16 for colour and opacity, float32 for position: colour is a
+        display quantity that never needed 32 bits, while position feeds the
+        voxel index and must not be quantised into the wrong cell.
+        """
+        import io as _io
+
+        arrays = {
+            "xyz": np.asarray(self.xyz, np.float32),
+            "features_dc": np.asarray(self.features_dc, np.float16),
+            "opacity": np.asarray(self.opacity, np.float16),
+        }
+        if vertices is not None:
+            arrays["vertices"] = np.asarray(vertices, np.float32)
+        if faces is not None:
+            arrays["faces"] = np.asarray(faces, np.int32)
+
+        buf = _io.BytesIO()
+        np.savez_compressed(buf, **arrays)
+        return buf.getvalue()
+
+    @classmethod
+    def from_npz(cls, data: bytes):
+        """Returns `(cloud, vertices, faces)`; the mesh pair may be `None`."""
+        import io as _io
+
+        z = np.load(_io.BytesIO(data))
+        cloud = cls(xyz=z["xyz"].astype(np.float64),
+                    features_dc=z["features_dc"].astype(np.float32),
+                    opacity=z["opacity"].astype(np.float32))
+        verts = z["vertices"].astype(np.float64) if "vertices" in z else None
+        faces = z["faces"] if "faces" in z else None
+        return cloud, verts, faces
+
 #: 3D Gaussian Splatting stores base colour as the degree-0 spherical-harmonic
 #: coefficient; every renderer in that lineage converts with this constant.
 #: TRELLIS's `save_ply` writes `f_dc_*` raw and leaves the conversion to the
@@ -93,8 +137,68 @@ def gaussian_rgb(features_dc: np.ndarray, *, apply_sh: bool = True) -> np.ndarra
     return np.clip(SH_C0 * dc + 0.5 if apply_sh else dc, 0.0, 1.0)
 
 
+def texel_matched_resolution(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    uv: np.ndarray,
+    texture_size: int,
+    *,
+    percentile: float = 99.9,
+    floor: int = 64,
+    cap: int = 4096,
+) -> int:
+    """Voxel resolution whose edge matches the atlas's own texel footprint.
+
+    Picking this by hand is how the first probe was wasted: `res=256` over a
+    figure 1.0 long gives a 0.12-tall head 31 voxel layers, while the atlas gave
+    that same head 237 texel rows. The texture then interpolated 237 rows out of
+    31 distinct values and the face came back as mush -- a limit of the sampler
+    that looked exactly like a limit of the model
+    (docs/benchmark/gaussian_bake/README.md).
+
+    So derive it. Each triangle has a texel density -- its UV area in texels over
+    its world area -- and the field must resolve the *dense* triangles, not the
+    average one, because that is where detail lives. Hence a high percentile
+    rather than a mean: a body's large flat charts would otherwise drag the
+    resolution down to where faces stop working.
+
+    The percentile is deliberately near the top. Over-resolving is graceful --
+    queries that find an empty voxel fall through to a coarser level, which is
+    the same blur under-resolving would have given anyway -- while
+    under-resolving is unconditional. Measured on the probe mesh, the densest
+    chart *is* the head, so nothing below ~p99 serves a face.
+
+    Returns an edge count across the mesh's longest axis, so voxels are cubic.
+    """
+    v = np.asarray(vertices, np.float64)
+    f = np.asarray(faces)
+    t = v[f]
+    world = np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1) / 2.0
+
+    q = np.asarray(uv, np.float64)[f]
+    # 2D cross product; np.cross on 2-vectors is deprecated in numpy 2.
+    duv1, duv2 = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]
+    uv_area = np.abs(duv1[:, 0] * duv2[:, 1] - duv1[:, 1] * duv2[:, 0]) / 2.0
+
+    ok = (world > 0) & (uv_area > 0)
+    if not ok.any():
+        return floor
+    # texels per unit of world area, then the edge length one texel covers
+    density = uv_area[ok] * (texture_size ** 2) / world[ok]
+    texel_edge = 1.0 / np.sqrt(np.percentile(density, percentile))
+
+    longest = float((v.max(0) - v.min(0)).max())
+    res = int(np.ceil(longest / max(texel_edge, 1e-9)))
+    return int(np.clip(res, floor, cap))
+
+
 class ColorField:
     """Opacity-weighted colour of a point cloud, averaged into sparse voxels.
+
+    Voxels are **cubic in world space**: every axis is divided by the same edge,
+    derived from the longest one. Normalising each axis independently would make
+    a tall thin subject's voxels tall and thin too, so the resolution that suits
+    its height would over-blur its width.
 
     Multi-resolution on purpose. A mesh vertex can sit slightly outside the
     cloud -- TRELLIS extracts the surface from the same latent, but not from the
@@ -102,14 +206,16 @@ class ColorField:
     black. Coarser levels answer the misses, so coverage degrades into blur
     rather than into holes.
 
-    Sparse rather than dense: a 256^3 dense grid is 16.7M cells for a cloud of a
-    few hundred thousand points, nearly all of it empty.
+    Sparse rather than dense: at res=2048 a dense grid would be 8.6 *billion*
+    cells, while the occupied set can never exceed the number of input points.
+    Cost scales with the cloud, not with res^3, which is why raising the
+    resolution is close to free.
 
-    The last level is deliberately `1` -- a single voxel spanning the whole
-    cloud, which is occupied by construction. Without it a query clamped to a
-    corner of the bounding box can miss at *every* level and come back black,
-    which reads as a hole in the texture rather than as the miss it is. Falling
-    back to the cloud's mean colour is the right failure: blurry, not wrong.
+    The coarsest level is always a single voxel spanning the whole cloud, which
+    is occupied by construction. Without it a query clamped to a corner of the
+    bounding box can miss at *every* level and come back black, reading as a
+    hole in the texture rather than as the miss it is. Falling back to the
+    cloud's mean colour is the right failure: blurry, not wrong.
     """
 
     def __init__(
@@ -118,7 +224,8 @@ class ColorField:
         rgb: np.ndarray,
         weight: np.ndarray | None = None,
         *,
-        levels: tuple[int, ...] = (256, 64, 16, 4, 1),
+        resolution: int = 256,
+        growth: int = 4,
         pad: float = 1e-3,
     ) -> None:
         xyz = np.asarray(xyz, np.float64)
@@ -128,44 +235,51 @@ class ColorField:
         self._lo = xyz.min(0) - pad
         span = (xyz.max(0) + pad) - self._lo
         self._span = np.where(span > 0, span, 1.0)
-        self._levels: list[tuple[int, np.ndarray, np.ndarray]] = []
+        self._longest = float(self._span.max())
+        self._levels: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
 
-        unit = (xyz - self._lo) / self._span
-        for res in levels:
-            keys = self._keys(unit, res)
+        res = int(max(1, resolution))
+        while True:
+            dims = np.maximum(np.ceil(self._span / (self._longest / res)).astype(np.int64), 1)
+            keys = self._keys(xyz, dims)
             uniq, inv = np.unique(keys, return_inverse=True)
             acc = np.zeros((len(uniq), 3), np.float64)
             den = np.zeros(len(uniq), np.float64)
             np.add.at(acc, inv, rgb * w[:, None])
             np.add.at(den, inv, w)
             mean = (acc / np.maximum(den, 1e-8)[:, None]).astype(np.float32)
-            self._levels.append((res, uniq, mean))
+            self._levels.append((res, dims, uniq, mean))
+            if res == 1:
+                break
+            res = max(1, res // growth)
+
         log.info(
-            "colour field: %d points into %s occupied voxels",
-            len(xyz), [len(k) for _, k, _ in self._levels],
+            "colour field: %d points, resolutions %s -> occupied %s",
+            len(xyz), [r for r, _, _, _ in self._levels],
+            [len(k) for _, _, k, _ in self._levels],
         )
 
-    @staticmethod
-    def _keys(unit: np.ndarray, res: int) -> np.ndarray:
-        ijk = np.clip((unit * res).astype(np.int64), 0, res - 1)
-        return (ijk[:, 0] * res + ijk[:, 1]) * res + ijk[:, 2]
+    def _keys(self, pts: np.ndarray, dims: np.ndarray) -> np.ndarray:
+        unit = (pts - self._lo) / self._span
+        ijk = np.clip((unit * dims).astype(np.int64), 0, dims - 1)
+        return (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
 
     def sample(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Colour per query point, plus a mask of which points any level answered.
 
-        `hit` is False only where no level could answer, which should be empty
-        in practice -- worth surfacing rather than silently painting black.
+        `hit` is False only where no level could answer, which the final res=1
+        level makes impossible -- kept as a return value so a caller can assert
+        on it rather than trust the invariant.
         """
         pts = np.asarray(points, np.float64)
-        unit = np.clip((pts - self._lo) / self._span, 0.0, 1.0 - 1e-9)
         out = np.zeros((len(pts), 3), np.float32)
         hit = np.zeros(len(pts), bool)
 
-        for res, keys, colours in self._levels:
+        for _res, dims, keys, colours in self._levels:
             todo = np.flatnonzero(~hit)
             if todo.size == 0:
                 break
-            q = self._keys(unit[todo], res)
+            q = self._keys(pts[todo], dims)
             pos = np.searchsorted(keys, q)
             ok = (pos < len(keys)) & (keys[np.minimum(pos, len(keys) - 1)] == q)
             if not ok.any():

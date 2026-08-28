@@ -44,14 +44,17 @@ class MeshInput(BaseModel):
             "it to reroll."
         ),
     )
-    texture: Literal["none", "gaussian"] = Field(
+    texture: Literal["none", "gaussian", "cloud"] = Field(
         default="none",
         description=(
             "'none' returns bare geometry, which is the tool's contract and its "
             "default. 'gaussian' bakes the appearance TRELLIS already decoded "
             "from the sketch onto a UV atlas -- no second model, no extra "
             "weights, and still MIT (docs/tools/mesh.md §6). Evaluation-grade: "
-            "it exists to be looked at before anything depends on it."
+            "it exists to be looked at before anything depends on it. "
+            "'cloud' returns the raw gaussian plus the mesh as an .npz rather "
+            "than a .glb, so the bake can be re-run offline at any resolution "
+            "without paying another cold start."
         ),
     )
     texture_size: int = Field(
@@ -60,12 +63,25 @@ class MeshInput(BaseModel):
         le=4096,
         description="Atlas resolution. Ignored unless `texture` is set.",
     )
+    field_resolution: int | None = Field(
+        default=None,
+        ge=32,
+        le=4096,
+        description=(
+            "Colour-field voxel resolution across the mesh's longest axis. "
+            "Left unset it is derived from the atlas's own texel density, which "
+            "is the right answer -- a fixed 256 under-resolved a head by 7.7x "
+            "and made the first bake unreadable "
+            "(docs/benchmark/gaussian_bake/README.md). Set it only to reproduce "
+            "a specific measurement."
+        ),
+    )
 
 
 class MeshTool(Tool):
     name = "mesh"
     summary = "Sketch → untextured 3D reference mesh to draw over"
-    version = "0.2.0"
+    version = "0.3.0"
 
     InputModel = MeshInput
     OutputModel = MediaResponse  # binary .glb
@@ -97,7 +113,14 @@ class MeshTool(Tool):
             seed=req.seed,
             texture=req.texture,
             texture_size=req.texture_size,
+            field_resolution=req.field_resolution,
         )
+        if req.texture == "cloud":
+            return MediaResponse(
+                data=result.glb,
+                media_type="application/octet-stream",
+                filename="appearance.npz",
+            )
         return MediaResponse(
             data=result.glb,
             media_type="model/gltf-binary",
