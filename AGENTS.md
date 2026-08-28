@@ -237,6 +237,14 @@ a clean, deployable `Tool`.
   massively simplifies this image — do that early.
 - Keep **`core` importable CPU-side** (no GPU import at module load) so tests and the
   registry run without a GPU.
+- **Never build a model image locally — dispatch `images.yml`.** `Dockerfile` and
+  `Dockerfile.mesh` are 6.5–8 GB each and their build cache is larger still; three
+  failed local mesh builds left 14.8 GB of cache and a 26 GB VHDX on a workstation
+  that had no room for it, and pruning does not give the space back without an
+  elevated `scripts/compact_docker_disk.ps1`. Local Docker is for the small things
+  — the proxy, an nginx change. Everything with a model in it goes to a runner:
+  `gh workflow run images.yml --ref <branch> -f tag=<tag> -f only=mesh`
+  (details and the reproduce-a-failure recipe: `docs/DEPLOY.md` "Build and push").
 - **Run (target):** `uv run hvym-img-serve` → FastAPI on a port; `POST /tools/reangle`.
   Deploy the container to **RunPod serverless** (scale-to-zero) or a persistent 24 GB box.
 - **CLI (target):** `uv run hvym-img reangle --in drawing.png --out char.glb`.

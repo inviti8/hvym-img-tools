@@ -74,11 +74,35 @@ gh workflow run images.yml -f tag=0.1.0        # .github/workflows/images.yml
 gh run watch $(gh run list --workflow=images.yml --limit 1 --json databaseId -q '.[0].databaseId')
 ```
 
-Locally, if you need to reproduce a build failure:
+### Locally: the proxy, and nothing else
+
+Local Docker is for the small, fast things — spinning up the proxy, checking an
+nginx change. **The model images are not among them.**
 
 ```sh
-docker build -f docker/Dockerfile       -t hvym-img-tools:0.1.0 .
-docker build -f docker/Dockerfile.proxy -t hvym-img-proxy:0.1.0 .
+docker build -f docker/Dockerfile.proxy -t hvym-img-proxy:0.1.0 .   # ~270 MB, fine
+```
+
+**Never build `Dockerfile` or `Dockerfile.mesh` on a workstation.** They are
+6.5–8 GB each and the BuildKit cache behind them is larger than the images.
+Measured, on a machine with a small C: — three *failed* mesh builds left
+**14.8 GB of build cache and a 26 GB VHDX**, and Windows does not return that
+space when the cache is pruned: `docker builder prune` frees it only *inside*
+the virtual disk, which then has to be compacted from an elevated shell
+(`scripts/compact_docker_disk.ps1`). The disk cost outlives the build, and it
+is not obvious until the machine is full.
+
+The uplink makes it worse, not just the disk. Two consecutive local mesh builds
+died on interrupted wheel downloads — cudnn at 331/665 MB, cublas at 77/363 MB
+— which is the failure mode `images.yml` was written to avoid. `PIP_RESUME_RETRIES`
+in `Dockerfile.mesh` now softens it, but a runner on GHCR's own network does not
+have the problem at all.
+
+To reproduce a GPU build failure, dispatch CI against your branch rather than
+building locally — the runner has the disk and the bandwidth:
+
+```sh
+gh workflow run images.yml --ref my-branch -f tag=0.5.0-probe -f only=mesh
 ```
 
 ### Which GPUs each image may run on
