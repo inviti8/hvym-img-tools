@@ -11,6 +11,8 @@ with it (docs/tools/hallucinate.md records that decision).
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from ...backbones import get_backbone, warm_kernels
@@ -42,12 +44,28 @@ class MeshInput(BaseModel):
             "it to reroll."
         ),
     )
+    texture: Literal["none", "gaussian"] = Field(
+        default="none",
+        description=(
+            "'none' returns bare geometry, which is the tool's contract and its "
+            "default. 'gaussian' bakes the appearance TRELLIS already decoded "
+            "from the sketch onto a UV atlas -- no second model, no extra "
+            "weights, and still MIT (docs/tools/mesh.md §6). Evaluation-grade: "
+            "it exists to be looked at before anything depends on it."
+        ),
+    )
+    texture_size: int = Field(
+        default=1024,
+        ge=256,
+        le=4096,
+        description="Atlas resolution. Ignored unless `texture` is set.",
+    )
 
 
 class MeshTool(Tool):
     name = "mesh"
     summary = "Sketch → untextured 3D reference mesh to draw over"
-    version = "0.1.0"
+    version = "0.2.0"
 
     InputModel = MeshInput
     OutputModel = MediaResponse  # binary .glb
@@ -77,6 +95,8 @@ class MeshTool(Tool):
             backbone=backbone,
             target_faces=req.target_faces,
             seed=req.seed,
+            texture=req.texture,
+            texture_size=req.texture_size,
         )
         return MediaResponse(
             data=result.glb,

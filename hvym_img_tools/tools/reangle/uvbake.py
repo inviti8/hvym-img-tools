@@ -11,7 +11,6 @@ art onto the mesh **from the side** — a bug this module exists to prevent
 """
 from __future__ import annotations
 
-import io
 import logging
 from dataclasses import dataclass
 
@@ -19,6 +18,9 @@ import numpy as np
 from PIL import Image
 
 from ...core.imageio import DEFAULT_MARGIN, DEFAULT_SIZE, fit_to_frame
+# Re-exported: both live in core so `core.gsbake` can share the sampler
+# without core importing a tool. Callers still import them from here.
+from ...core.meshops import MIN_SPLAT_POINTS, densify, textured_glb  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -50,38 +52,6 @@ def _splat_mask(points: np.ndarray, size: int, margin: float, radius: int = 2) -
         for dx in range(-radius, radius + 1):
             mask[np.clip(px[:, 1] + dy, 0, size - 1), np.clip(px[:, 0] + dx, 0, size - 1)] = True
     return mask
-
-
-#: Below this many points the vertex splat is too sparse to approximate a
-#: silhouette, so we densify by sampling the faces first.
-MIN_SPLAT_POINTS = 40_000
-
-
-def densify(points: np.ndarray, faces: np.ndarray | None, target: int) -> np.ndarray:
-    """Scatter extra points across faces so a splat approximates a silhouette.
-
-    A coarse mesh (a cube has 8 vertices) otherwise scores ~0 IoU on every axis
-    and the "best" view becomes arbitrary. Cheap barycentric sampling, no deps.
-
-    Dimension-generic: `points` may be the 3D vertices or any per-vertex 2D
-    attribute sharing their indexing, such as UVs. Anything scoring a mesh
-    against the matte must densify the same way or the two masks are not
-    comparable -- a decimated 20k-face mesh has ~10k vertices, well under
-    `MIN_SPLAT_POINTS`, and splatting those alone understates coverage badly.
-    """
-    if faces is None or len(faces) == 0 or len(points) >= target:
-        return points
-    per_face = int(np.ceil(target / len(faces)))
-    rng = np.random.default_rng(0)  # deterministic: detection must be reproducible
-    tris = points[faces]
-    u = rng.random((len(faces), per_face, 1))
-    v = rng.random((len(faces), per_face, 1))
-    over = (u + v) > 1
-    u = np.where(over, 1 - u, u)
-    v = np.where(over, 1 - v, v)
-    a, b, c = tris[:, 0:1], tris[:, 1:2], tris[:, 2:3]
-    pts = (a + u * (b - a) + v * (c - a)).reshape(-1, points.shape[1])
-    return np.vstack([points, pts])
 
 
 def detect_front_view(
@@ -154,18 +124,10 @@ def front_planar_uv(
 
 
 def bake_glb(vertices: np.ndarray, faces: np.ndarray, uv: np.ndarray, art: Image.Image) -> bytes:
-    """Export an embedded-texture `.glb` so `load_from_memory` gets everything."""
-    import trimesh
+    """Export an embedded-texture `.glb` so `load_from_memory` gets everything.
 
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    mesh.visual = trimesh.visual.TextureVisuals(
-        uv=uv,
-        material=trimesh.visual.material.PBRMaterial(
-            baseColorTexture=art,
-            metallicFactor=0.0,
-            roughnessFactor=1.0,   # unlit-ish: never add fake 3D shading (§3)
-        ),
-    )
-    buf = io.BytesIO()
-    mesh.export(buf, file_type="glb")
-    return buf.getvalue()
+    Thin wrapper: the export itself moved to `core.meshops` once `mesh` needed
+    the same one, including the unlit-ish material (§3 — never add fake 3D
+    shading over artwork that already carries the artist's own).
+    """
+    return textured_glb(vertices, faces, uv, art)

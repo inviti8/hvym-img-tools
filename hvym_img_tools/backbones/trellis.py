@@ -152,7 +152,30 @@ class TrellisBackbone:
         import torch
         import trimesh
 
-        out = self._pipe.run(_as_trellis_input(image), seed=seed, formats=["mesh"])
+        mesh, _ = self._run(image, seed=seed, formats=["mesh"])
+        return mesh
+
+    def reconstruct_appearance(self, image: Image.Image, *, seed: int = 0, **_: Any):
+        """Sketch -> `(trimesh.Trimesh, GaussianCloud)`.
+
+        The same reconstruction as `reconstruct`, plus the appearance TRELLIS
+        already decoded and we normally discard. Asking for the Gaussian adds
+        only the SLAT decoder pass -- it needs spconv, which we ship, and *not*
+        a rasteriser, which we deliberately do not (`core.gsbake` explains why).
+
+        Returned as plain arrays rather than TRELLIS's Gaussian object so
+        nothing downstream has to import the model stack.
+        """
+        return self._run(image, seed=seed, formats=["mesh", "gaussian"])
+
+    def _run(self, image: Image.Image, *, seed: int, formats: list[str]):
+        import numpy as np
+        import torch
+        import trimesh
+
+        from ..core.gsbake import GaussianCloud
+
+        out = self._pipe.run(_as_trellis_input(image), seed=seed, formats=formats)
         meshes = out.get("mesh") or []
         if not meshes:
             raise RuntimeError("TRELLIS returned no mesh")
@@ -161,7 +184,33 @@ class TrellisBackbone:
         def _np(x: Any) -> Any:
             return x.detach().cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
 
-        return trimesh.Trimesh(vertices=_np(m.vertices), faces=_np(m.faces), process=False)
+        mesh = trimesh.Trimesh(vertices=_np(m.vertices), faces=_np(m.faces), process=False)
+
+        if "gaussian" not in formats:
+            return mesh, None
+
+        clouds = out.get("gaussian") or []
+        if not clouds:
+            raise RuntimeError("TRELLIS returned no gaussian despite being asked for one")
+        g = clouds[0]
+
+        # Use the public getters: they apply the aabb denormalisation and the
+        # opacity sigmoid, which the raw `_`-prefixed tensors have not had.
+        xyz = _np(g.get_xyz).reshape(-1, 3)
+        opacity = _np(g.get_opacity).reshape(-1)
+        try:
+            dc = _np(g.get_features)
+        except Exception:  # pragma: no cover - only when _features_rest is absent
+            dc = _np(g._features_dc)
+        dc = dc.reshape(len(xyz), -1)[:, :3]
+
+        cloud = GaussianCloud(xyz=xyz, features_dc=dc, opacity=opacity)
+        log.info(
+            "TRELLIS appearance: %d gaussians, extent %s; mesh extent %s",
+            len(cloud), cloud.extent().round(3).tolist(),
+            (mesh.vertices.max(0) - mesh.vertices.min(0)).round(3).tolist(),
+        )
+        return mesh, cloud
 
 
 register_backbone(

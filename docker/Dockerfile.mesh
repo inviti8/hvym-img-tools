@@ -63,6 +63,16 @@ RUN pip install --upgrade pip && pip install --ignore-installed blinker
 RUN printf 'numpy<2\n' > /etc/pip-constraints.txt
 ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
 
+# This image pulls ~3GB of wheels, several of them hundreds of MB from
+# download.pytorch.org, and a single interrupted transfer fails the whole layer
+# after pip exhausts its default 5 resume attempts -- observed twice in a row on
+# cudnn (665MB) and cublas (363MB). Set as PIP_* env vars rather than flags on
+# one RUN so every pip call in the build inherits them, including the ones that
+# pull kaolin and xformers.
+ENV PIP_RESUME_RETRIES=20 \
+    PIP_RETRIES=10 \
+    PIP_DEFAULT_TIMEOUT=120
+
 RUN pip install "torch==${TORCH_VERSION}" torchvision --index-url ${TORCH_INDEX}
 
 # --- TRELLIS's dependencies ------------------------------------------------
@@ -197,7 +207,11 @@ from hvym_img_tools.tools.reangle.tool import ReangleTool, default_backbone; \
 assert default_backbone() == 'trellis', default_backbone(); \
 needed = ReangleTool().models_needed(); \
 assert needed == ['isnet', 'trellis'], needed; \
-print('ok: tools registered ->', names, '| reangle warms', needed)"
+from hvym_img_tools.tools.mesh.tool import MeshInput; \
+tex = MeshInput.model_fields['texture'].default; \
+assert tex == 'none', 'gaussian texturing must stay opt-in, got %r' % tex; \
+import xatlas; \
+print('ok: tools registered ->', names, '| reangle warms', needed, '| texture default', tex)"
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

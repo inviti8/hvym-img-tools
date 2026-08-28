@@ -12,6 +12,9 @@ dependencies = [
     # must decimate (raw backbone output is up to 1.2M faces / 20.8 MB), and it
     # is CPU-only, so it belongs in the base install rather than the gpu extra.
     "fast-simplification>=0.1.7",
+    # trimesh delegates `unwrap()` to this. The `mesh` tool needs a UV atlas
+    # whenever it bakes a texture, and it is a small CPU-only wheel.
+    "xatlas>=0.0.9",
     "pydantic>=2.6",
 ]
 
