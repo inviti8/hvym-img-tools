@@ -22,6 +22,12 @@ PORT="${HVYM_BIND_PORT:-8080}"
 BIND="${HVYM_BIND_ADDR:-127.0.0.1}"
 CONF_DIR="/etc/hvym-img-tools"
 ENV_FILE="$CONF_DIR/proxy.env"
+# The paid-window store (docs/X402_BILLING.md). A named volume, not a bind mount
+# and definitely not the container filesystem: this script REPLACES the container
+# on every upgrade, and a window the artist paid for that vanishes on upgrade is
+# a refund request. Survives --uninstall too; removing it is a separate, explicit
+# `docker volume rm`.
+BILLING_VOLUME="${HVYM_BILLING_VOLUME:-hvym-img-billing}"
 MEM_LIMIT="${HVYM_MEM_LIMIT:-512m}"
 MEM_RESERVE="${HVYM_MEM_RESERVE:-256m}"
 CPUS="${HVYM_CPUS:-0.5}"
@@ -157,6 +163,26 @@ HVYM_API_KEY=$api_key
 HVYM_MAX_UPLOAD_MB=$MAX_UPLOAD_MB
 HVYM_PROXY_TIMEOUT=$PROXY_TIMEOUT
 HVYM_PORT=8080
+
+# ---------------------------------------------------------------- x402 billing
+# docs/X402_BILLING.md. Both enforcement flags are OFF here on purpose: the
+# proxy verifies whatever wallet signatures arrive and logs what it *would* have
+# refused, without turning anyone away. Turn them on one at a time, in this
+# order, and only once the logs show real clients signing:
+#
+#   1. HVYM_REQUIRE_SIGNED_IDENTITY=true   -- unsigned requests start failing 401
+#   2. HVYM_REQUIRE_PAYMENT=true           -- unpaid identities start getting 402
+#
+# Step 2 refuses to start without HVYM_PAYEE_ADDRESS (and, for USDC, an issuer):
+# a 402 challenge naming no payee is one nobody can satisfy.
+HVYM_REQUIRE_SIGNED_IDENTITY=false
+HVYM_REQUIRE_PAYMENT=false
+HVYM_BILLING_DB=/data/billing.sqlite
+# HVYM_PAYEE_ADDRESS=G...            # HEAVYMETA's receiving account (required)
+# HVYM_USDC_ISSUER=G...              # USDC issuer (required while asset is USDC)
+# HVYM_STELLAR_NETWORK=public        # or testnet, to rehearse the whole flow
+# HVYM_AI_WINDOW_S=900               # what one payment buys
+# HVYM_AI_PRICE_PER_MIN=0.05         # USD/min; amount = window/60 * this
 EOF
   chmod 600 "$ENV_FILE"
   ok "wrote $ENV_FILE"
@@ -179,8 +205,10 @@ install_container() {
     -p "${BIND}:${PORT}:8080" \
     --memory="$MEM_LIMIT" --memory-reservation="$MEM_RESERVE" --cpus="$CPUS" \
     --env-file "$ENV_FILE" \
+    -v "${BILLING_VOLUME}:/data" \
     "$IMAGE" >/dev/null
   ok "started $NAME on ${BIND}:${PORT} (mem ${MEM_LIMIT}, cpus ${CPUS})"
+  ok "paid-window store on volume ${BILLING_VOLUME} (survives upgrades)"
 }
 
 verify() {
@@ -206,6 +234,14 @@ verify() {
   case "$health" in
     *'"auth":true'*) ok "auth is enabled" ;;
     *) die "auth is DISABLED -- refusing to report success. Check HVYM_API_KEY in $ENV_FILE" ;;
+  esac
+
+  # Which half of the x402 rollout is live (docs/X402_BILLING.md §2). Reported,
+  # never asserted: "observing only" is the correct state for a first install.
+  case "$health" in
+    *'"payment":true'*)         ok "x402: payment ENFORCED -- unpaid identities get 402" ;;
+    *'"signed_identity":true'*) ok "x402: signed identity enforced, payment not yet" ;;
+    *)                          ok "x402: observing only (both flags off in $ENV_FILE)" ;;
   esac
 
   # Prove the door is locked rather than trusting the flag.
@@ -296,6 +332,10 @@ do_uninstall() {
   fi
   echo "Left in place: $ENV_FILE (it holds your keys)."
   echo "Remove it yourself when you are done:  rm -rf $CONF_DIR"
+  echo
+  echo "Also left in place: volume ${BILLING_VOLUME} -- the paid windows artists"
+  echo "have already bought. Deleting it is refusing time they paid for, so it is"
+  echo "deliberately a separate step:  docker volume rm ${BILLING_VOLUME}"
 }
 
 main() {

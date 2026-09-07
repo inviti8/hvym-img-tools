@@ -202,8 +202,32 @@ Other properties worth knowing:
 ## Running the proxy
 
 ```sh
-docker run -d --restart=unless-stopped -p 127.0.0.1:8080:8080   --memory=512m --memory-reservation=256m --cpus=0.5   -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)"   -e RUNPOD_API_KEY=...      `# never leaves the server`   -e RUNPOD_ENDPOINT_ID=...    -e HVYM_MAX_UPLOAD_MB=8 -e HVYM_PROXY_TIMEOUT=600   ghcr.io/inviti8/hvym-img-proxy:0.1.0
+docker run -d --restart=unless-stopped -p 127.0.0.1:8080:8080   --memory=512m --memory-reservation=256m --cpus=0.5   -e HVYM_API_KEY="$(python -m hvym_img_tools.core.auth)"   -e RUNPOD_API_KEY=...      `# never leaves the server`   -e RUNPOD_ENDPOINT_ID=...    -e HVYM_MAX_UPLOAD_MB=8 -e HVYM_PROXY_TIMEOUT=600   -v hvym-img-billing:/data  `# paid windows; see below`   ghcr.io/inviti8/hvym-img-proxy:0.1.0
 ```
+
+**Mount `/data` even before billing is on.** It holds the paid-window store
+(`docs/X402_BILLING.md` §3). The container is *replaced* on every upgrade, so a
+window an artist paid for that lived on the container filesystem would vanish
+with it — a refund request, caused by a missing flag. `install_proxy.sh` and
+`update_proxy.sh` both attach it; only a hand-rolled `docker run` can forget it.
+
+### Turning the meter on
+
+Both switches ship `false`. In that state the proxy verifies whatever wallet
+signatures arrive, logs what it *would* have refused, and serves every request
+exactly as it does today — which is how you find out whether real clients are
+signing before anything starts failing.
+
+| Env | Flip when |
+|---|---|
+| `HVYM_REQUIRE_SIGNED_IDENTITY=true` | the logs show signed requests and no rejections |
+| `HVYM_REQUIRE_PAYMENT=true` | after the above, and after a **testnet** rehearsal |
+
+The second refuses to start without `HVYM_PAYEE_ADDRESS` (and `HVYM_USDC_ISSUER`
+while the asset is USDC). That is deliberate: a `402` challenge naming no payee
+is one nobody can satisfy, and it would read to the artist as a client bug.
+`/healthz` reports both as booleans (`signed_identity`, `payment`) so you can see
+which half is live without reading the env file. Full knob list: X402_BILLING.md §5.
 
 ### Updating
 

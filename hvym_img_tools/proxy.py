@@ -14,6 +14,12 @@ without touching the client.
 
 The proxy does no GPU work, so it can run on the cheapest always-on box available.
 
+**Billing** (docs/X402_BILLING.md) rides on top, off by default. When enabled,
+identity stops being the shared `X-API-Key` and becomes a per-request ed25519
+signature from the artist's own wallet (`core.identity`), and a live paid window
+becomes a precondition for spending GPU time (`billing`). Both are behind flags
+so this ships, and is observed, before it enforces.
+
     HVYM_API_KEY=...            # the scoped key Inkternity holds
     RUNPOD_API_KEY=...          # NEVER leaves this process
     RUNPOD_ENDPOINT_ID=...      # the serverless endpoint
@@ -32,9 +38,18 @@ from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
+from .billing import Billing, PaymentInvalid, PaymentRequired
 from .core.auth import API_KEY_HEADER, ApiKeyAuth, extract_key
 from .core.config import Config
+from .core.identity import (
+    AUTH_HEADER,
+    PUBKEY_HEADER,
+    IdentityError,
+    IdentityVerifier,
+    SignedIdentity,
+)
 from .core.server import configure_logging
 from .warm import WarmPool
 
@@ -116,6 +131,64 @@ def create_app() -> FastAPI:
 
     guard = [Depends(_auth_dependency(auth))]
 
+    # ---------------------------------------------------------------- billing
+    # docs/X402_BILLING.md. Inert until its flags are set: with both off this
+    # only *observes* -- it verifies whatever signatures arrive, logs what it
+    # would have refused, and serves the request exactly as before. That is the
+    # whole point of the phased rollout (§2): the meter can be watched running
+    # against real traffic before it is allowed to turn anyone away.
+    billing = Billing()
+    verifier = IdentityVerifier(window_s=billing.config.sign_window_s)
+    if billing.require_payment:
+        broken = billing.config.misconfiguration()
+        if broken:
+            # Refusing to start beats 402-ing every artist with a challenge that
+            # names no payee: nobody could pay it, and the failure would look
+            # like a client bug.
+            raise RuntimeError(f"HVYM_REQUIRE_PAYMENT is on but {broken}")
+        log.info(
+            "billing ENFORCED: %s %s per %.0fs window to %s on %s (db=%s)",
+            billing.config.amount, billing.config.asset, billing.config.window_s,
+            billing.config.payee[:8], billing.config.network, billing.config.db_path,
+        )
+    elif billing.require_identity:
+        log.info("signed identity ENFORCED; payment not enforced (observing only)")
+    else:
+        log.info("billing observing only; set HVYM_REQUIRE_SIGNED_IDENTITY to enforce identity")
+
+    async def identity_for(
+        request: Request, *, tool: str, lease_id: str = ""
+    ) -> SignedIdentity | None:
+        """Verify the signed identity on a request, honouring the rollout flag.
+
+        Returns None when there is no usable identity *and* one is not required
+        yet -- callers then fall back to today's `X-API-Key`-only behaviour. The
+        path verified is the one this app sees (`request.url.path`), which is
+        also what the client signs; if an nginx prefix is ever added in front,
+        both sides have to learn about it together.
+        """
+        pubkey_header = request.headers.get(PUBKEY_HEADER)
+        auth_header = request.headers.get(AUTH_HEADER)
+        try:
+            return verifier.verify(
+                pubkey_header=pubkey_header,
+                auth_header=auth_header,
+                method=request.method,
+                path=request.url.path,
+                tool=tool,
+                lease_id=lease_id,
+            )
+        except IdentityError as exc:
+            if billing.require_identity:
+                raise HTTPException(status_code=401, detail=f"signed identity: {exc}") from exc
+            if IdentityVerifier.presented(pubkey_header, auth_header):
+                # A client that meant to sign and got it wrong is a bug worth
+                # seeing now, while it is still harmless.
+                log.warning("signed identity rejected (not enforced): %s", exc)
+            else:
+                log.debug("unsigned request to %s (identity not enforced)", request.url.path)
+            return None
+
     # Warm leases (docs/WARMING.md). Built before the app so the keepalive loop
     # can be torn down from a lifespan handler: if this process dies the pings
     # stop and the worker sleeps on its own, which is the whole reason a lease
@@ -129,7 +202,7 @@ def create_app() -> FastAPI:
     def pool_for(tool: str) -> WarmPool:
         target = endpoint_for(tool)
         if target not in pools:
-            pools[target] = WarmPool(runpod_key, target)
+            pools[target] = WarmPool(runpod_key, target, on_warm=billing.on_warm)
         return pools[target]
 
     pool = pool_for("reangle")          # default endpoint's pool
@@ -139,8 +212,9 @@ def create_app() -> FastAPI:
         yield
         for p in list(pools.values()):
             await p.shutdown()
+        billing.close()
 
-    app = FastAPI(title="hvym-img-tools proxy", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="hvym-img-tools proxy", version="0.2.0", lifespan=lifespan)
     app.state.warm_pool = pool
 
     @app.get("/healthz", tags=["meta"])
@@ -154,13 +228,28 @@ def create_app() -> FastAPI:
             "runpod_configured": bool(runpod_key and (endpoint_id or tool_endpoints)),
             "endpoint_id": endpoint_id or None,
             "tool_endpoints": sorted(tool_endpoints) or None,
+            # Which half of the rollout is live. Deliberately booleans only: no
+            # payee, no price, no db path -- healthz stays free of anything an
+            # operator would not want on an open endpoint.
+            "signed_identity": billing.require_identity,
+            "payment": billing.require_payment,
         }
+
+    @app.exception_handler(PaymentRequired)
+    async def _payment_required(_request: Request, exc: PaymentRequired) -> JSONResponse:
+        # The x402 challenge is the response *body*, not a `detail` string: the
+        # client parses `x402` to build a payment (docs/X402_BILLING.md §4.1), so
+        # burying it inside FastAPI's default envelope would break the contract.
+        body: dict[str, Any] = {"detail": exc.detail}
+        if exc.challenge:
+            body["x402"] = exc.challenge
+        return JSONResponse(status_code=402, content=body)
 
     # ---------------------------------------------------------------- warming
     # Gated by the same scoped key as /tools/{name}: a HVYM_API_KEY holder can
     # ask for warmth and nothing else. The RunPod account key stays in this
     # process (docs/AUTH.md, docs/WARMING.md).
-    async def _lease_id_from(request: Request) -> tuple[str | None, str]:
+    async def _lease_id_from(request: Request) -> tuple[str | None, str, str]:
         """Body is optional -- a first POST /warm legitimately has none."""
         try:
             body = await request.json()
@@ -178,13 +267,24 @@ def create_app() -> FastAPI:
         if not runpod_key or not endpoint_id:
             raise HTTPException(status_code=503, detail="proxy is not configured")
         lease_id, label, tool = await _lease_id_from(request)
+        identity = await identity_for(request, tool=tool, lease_id=lease_id or "")
+        if identity is not None:
+            # The verified pubkey *is* the metering label. A client-supplied
+            # `label` is never trusted for it: attribution the payer can choose
+            # is attribution someone else can wear.
+            label = identity.pubkey
+            billing.require(identity.pubkey)
+        elif billing.require_payment:
+            billing.require(None)
         return await pool_for(tool).acquire(lease_id, label)
 
     @app.get("/warm", tags=["warm"])
     async def warm_status(tool: str = "reangle") -> dict:
         # Unauthenticated on purpose: it is a read-only indicator that spends
         # nothing, and the UI wants it before the artist has a lease. It reports
-        # no key, no endpoint URL, and cannot start a worker.
+        # no key, no endpoint URL, and cannot start a worker. Payment does not
+        # gate it either (docs/X402_BILLING.md §3): an unpaid client still has to
+        # be able to read "cold" to know what it would be buying.
         if not runpod_key or not endpoint_id:
             raise HTTPException(status_code=503, detail="proxy is not configured")
         return await pool_for(tool).status()
@@ -196,13 +296,91 @@ def create_app() -> FastAPI:
         lease_id, _, tool = await _lease_id_from(request)
         if not lease_id:
             raise HTTPException(status_code=422, detail="lease_id is required to release")
+        identity = await identity_for(request, tool=tool, lease_id=lease_id)
+        if identity is not None and billing.require_identity:
+            # Releasing never costs anything, so it needs no paid window -- but
+            # it does need ownership. Dropping another artist's lease would put
+            # out a worker they are still paying to keep warm.
+            owner = pool_for(tool).owner_of(lease_id)
+            if owner and owner != identity.pubkey:
+                raise HTTPException(
+                    status_code=403, detail="that lease belongs to another identity"
+                )
         return await pool_for(tool).release(lease_id)
+
+    # ------------------------------------------------------------------ x402
+    @app.get("/warm/price", tags=["warm"])
+    def warm_price() -> dict:
+        """Open and read-only, so the UI can show a price without taking a 402.
+
+        It issues no quote and touches no state: asking what something costs must
+        not itself be a billable event, or the price indicator becomes a meter.
+        """
+        return billing.price_view()
+
+    @app.post("/warm/pay", dependencies=guard, tags=["warm"])
+    async def warm_pay(request: Request) -> dict:
+        """Settle a Stellar payment the client already submitted itself.
+
+        We never move funds: the artist self-custodies and broadcasts, and this
+        route only confirms on Horizon that the payment landed, then extends a
+        window. A compromised proxy therefore has no path to anyone's money.
+        """
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - the proof may ride entirely in headers
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        tx_hash = (request.headers.get("X-Payment") or body.get("tx") or "").strip()
+        price_id = str(body.get("price_id") or "").strip()
+        tool = str(body.get("tool") or "reangle")[:32]
+
+        identity = await identity_for(
+            request, tool=tool, lease_id=str(body.get("lease_id") or "")
+        )
+        if identity is None:
+            # Unlike the gated routes, this one has no un-identified mode: a
+            # payment with no identity is money credited to nobody.
+            raise HTTPException(
+                status_code=401,
+                detail=f"{PUBKEY_HEADER}/{AUTH_HEADER} are required to settle a payment",
+            )
+        if not tx_hash:
+            raise HTTPException(
+                status_code=422, detail="X-Payment (a Stellar tx hash) is required"
+            )
+        broken = billing.config.misconfiguration()
+        if broken:
+            raise HTTPException(status_code=503, detail=f"billing is not configured: {broken}")
+
+        try:
+            settled = await billing.settle_payment(identity.pubkey, tx_hash, price_id)
+        except PaymentInvalid as exc:
+            # A fresh challenge rides along so a client that paid the wrong thing
+            # can correct it in one round trip rather than asking again.
+            raise PaymentRequired(billing.challenge(identity.pubkey), str(exc)) from exc
+
+        # Hand back the warm view too, so the client sees state/expires_at
+        # immediately instead of having to poll for it (§4.2).
+        settled["warm"] = await pool_for(tool).status()
+        return settled
 
     @app.post("/tools/{name}", dependencies=guard, response_class=Response)
     async def call_tool(name: str, request: Request) -> Response:
         target = endpoint_for(name)
         if not runpod_key or not target:
             raise HTTPException(status_code=503, detail="proxy is not configured")
+
+        # Charged before the upload is read, not after: a 402 should cost the
+        # artist one round trip, not an image body they have to send twice. The
+        # signature covers the path/tool/time/nonce -- the multipart body is
+        # deliberately unsigned (docs/X402_BILLING.md §2).
+        identity = await identity_for(request, tool=name)
+        if identity is not None:
+            billing.require(identity.pubkey)
+        elif billing.require_payment:
+            billing.require(None)
 
         form = await request.form()
         payload: dict[str, Any] = {"tool": name}

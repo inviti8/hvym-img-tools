@@ -78,7 +78,9 @@ the wait entirely with `scripts/warm.py on` ([WARMING.md](WARMING.md)).
 | Code | Meaning | What the client should do |
 |---|---|---|
 | `200` | success, binary body | use it |
-| `401` | missing/invalid key | surface as config error — do **not** retry |
+| `401` | missing/invalid key, or a signature we would not accept | surface as config error — do **not** retry |
+| `402` | no live paid window | read `x402`, pay, `POST /warm/pay`, retry — see below |
+| `403` | that lease belongs to another wallet | a bug in lease bookkeeping; do not retry |
 | `413` | image over 32 MB | downscale and resubmit |
 | `422` | malformed form fields | fix the request — a bug, not a transient |
 | `500` | the tool itself failed | show `detail`; retrying rarely helps |
@@ -204,6 +206,87 @@ server locally; the contract above is identical, just slower:
 ```sh
 uv run hvym-img-serve            # http://localhost:8000/docs
 ```
+
+## Paying for warm time (x402)
+
+**Not on yet.** The proxy ships with both switches off, so nothing below changes
+today's behaviour — an unsigned, unpaid client keeps working exactly as it does
+now. It is documented here because the client half is what has to move first.
+Full spec: [X402_BILLING.md](X402_BILLING.md). The authoritative client-side
+decision doc is Inkternity's `AI_BILLING_INTEGRATION.md`.
+
+### Sign every call (already shipped in the client)
+
+`RequestSigner` attaches two headers to every `POST /warm`, `DELETE /warm`,
+`POST /warm/pay` and `POST /tools/*`:
+
+```
+X-Ink-Pubkey: <G... Stellar strkey>
+X-Ink-Auth:   <base64url(64-byte ed25519 sig)> "." <base64url(payload)>
+```
+
+The proxy verifies the signature against the bytes **as received**, then checks
+that the signed method, path, `tool` and `lease_id` match the request it arrived
+on, that `t` is within 120 s, and that `n` has not been seen before. Three things
+follow from that, and each is a real client bug if ignored:
+
+- **Sign the path the proxy sees.** `/warm`, `/tools/mesh` — no host, no query.
+- **A fresh nonce per request.** Reusing one is a `401`, including on a retry:
+  re-sign, don't re-send.
+- **Keep the clock roughly right.** A machine 10 minutes off fails every call.
+
+`X-API-Key` still rides alongside and is still required. It is now a coarse
+bot-gate, not the identity — do not drop it.
+
+### When there is no paid window: `402`
+
+Acquiring or renewing a lease, and every tool call, needs a live window. Without
+one the response is `402` with the challenge as the body:
+
+```json
+{
+  "detail": "no live paid window for this identity",
+  "x402": {
+    "asset": "USDC", "issuer": "G...", "amount": "0.75",
+    "pay_to": "G...", "network": "public", "window_s": 900,
+    "memo": "9f2c…", "price_id": "9f2c…", "horizon": "https://horizon.stellar.org"
+  }
+}
+```
+
+Pay it **from the wallet in `X-Ink-Pubkey`** — the proxy checks the sender — for
+at least `amount` of `asset`, with `memo` set as a `MEMO_TEXT`. The memo is what
+binds the payment to this quote and this identity; without it the payment lands
+on-chain and settles nothing. Then present the proof:
+
+```
+POST /warm/pay
+X-Ink-Pubkey / X-Ink-Auth        (signed, like everything else)
+X-API-Key: <key>
+X-Payment: <stellar transaction hash>
+{"price_id": "9f2c…", "tool": "mesh"}
+```
+
+Sign it as `("POST", "/warm/pay", tool, "")` — the `tool` in the signature and the
+`tool` in the body must agree, exactly as on `/warm`; both default to `reangle`
+if omitted. The lease id is not part of this call.
+
+A `200` carries the settlement plus the current warm view. A `402` back means the
+payment did not check out — `detail` names which check failed, and a fresh
+challenge rides along so it can be corrected in one round trip.
+
+Two behaviours worth relying on:
+
+- **Re-submitting the same hash is safe.** It is idempotent by transaction hash,
+  so a dropped response can simply be retried; it will not be charged twice.
+- **The clock starts at `warm`, not at payment.** A window is bought as a credit
+  and only begins when a worker actually reaches `warm` for that wallet — so an
+  artist who paid and then sat through a cold start that never arrived keeps
+  their time. Do not start counting down locally from the payment.
+
+`GET /warm` and `GET /warm/price` stay open and free. `/warm/price` answers
+`{asset, amount, amount_per_min, window_s, pay_to, network, enforced}` so a UI can
+show a price without taking a `402` to find one.
 
 ## Checklist before wiring the UI
 

@@ -110,6 +110,7 @@ class WarmPool:
         ping_interval_s: float = PING_INTERVAL_S,
         renew_within_s: float = RENEW_WITHIN_S,
         clock=time.monotonic,
+        on_warm=None,
     ) -> None:
         self._key = runpod_key
         self._endpoint_id = endpoint_id
@@ -117,6 +118,13 @@ class WarmPool:
         self.ping_interval_s = ping_interval_s
         self.renew_within_s = renew_within_s
         self._clock = clock
+
+        #: Called with the labels of every held lease the first moment a worker
+        #: is actually warm. Billing hangs the settle-on-grant transition on it
+        #: (docs/X402_BILLING.md §3): a window the artist paid for must not
+        #: start ticking against a worker that never arrived. Deliberately a
+        #: plain callback -- the pool stays ignorant of what billing is.
+        self._on_warm = on_warm
 
         self._leases: dict[str, Lease] = {}
         self._lock = asyncio.Lock()
@@ -215,7 +223,30 @@ class WarmPool:
             # A health blip must not change the answer to "is a lease held".
             log.debug("warm: health check failed", exc_info=True)
         self._health_checked_at = now
+        self._notify_warm()
         return self._workers_ready
+
+    def _notify_warm(self) -> None:
+        """Tell the hook that warmth is real, if it is and anyone is holding it.
+
+        Fired from the health check rather than from `acquire`, because acquire
+        only knows a lease was *asked* for -- `_state()` is deliberately never a
+        guess, and neither is this. Exceptions are swallowed: a billing store
+        that stumbles must not take the keepalive loop down with it.
+        """
+        if self._on_warm is None or self._workers_ready <= 0 or not self._leases:
+            return
+        try:
+            self._on_warm([lease.label for lease in self._leases.values() if lease.label])
+        except Exception:  # noqa: BLE001 - never let a hook break warmth
+            log.warning("warm: on_warm hook failed", exc_info=True)
+
+    def owner_of(self, lease_id: str) -> str | None:
+        """The label (a verified wallet pubkey, once identity is enforced) that
+        holds this lease. `DELETE /warm` uses it so one artist cannot release
+        another's lease and drop a worker they are paying for."""
+        lease = self._leases.get(lease_id)
+        return lease.label if lease else None
 
     async def _ping(self) -> None:
         """Fire one keepalive job. Uses /runsync deliberately: during a cold start

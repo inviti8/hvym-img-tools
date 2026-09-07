@@ -19,7 +19,10 @@
 #     the vhost pointing at 127.0.0.1:8080 needs no change
 #
 # Existing configuration in /etc/hvym-img-tools/proxy.env is reused untouched:
-# your keys and endpoint id survive the update, and are never re-prompted.
+# your keys and endpoint id survive the update, and are never re-prompted. So do
+# the paid windows artists have already bought: they live on the hvym-img-billing
+# volume, which is re-attached below. An update that dropped them would be a
+# refund request, so the mount is not optional -- see docs/X402_BILLING.md.
 set -uo pipefail
 
 DEFAULT_TAG="0.1.2"
@@ -33,6 +36,8 @@ BIND="${HVYM_BIND_ADDR:-127.0.0.1}"
 MEM_LIMIT="${HVYM_MEM_LIMIT:-512m}"
 MEM_RESERVE="${HVYM_MEM_RESERVE:-256m}"
 CPUS="${HVYM_CPUS:-0.5}"
+# Must match install_proxy.sh, or an update silently starts with an empty store.
+BILLING_VOLUME="${HVYM_BILLING_VOLUME:-hvym-img-billing}"
 
 GRN=$(printf '\033[32m'); YEL=$(printf '\033[33m'); RED=$(printf '\033[31m')
 DIM=$(printf '\033[2m');  OFF=$(printf '\033[0m')
@@ -152,6 +157,7 @@ start_container() {
     -p "${BIND}:${PORT}:8080" \
     --memory="$MEM_LIMIT" --memory-reservation="$MEM_RESERVE" --cpus="$CPUS" \
     --env-file "$ENV_FILE" \
+    -v "${BILLING_VOLUME}:/data" \
     "$1" >/dev/null 2>&1
 }
 

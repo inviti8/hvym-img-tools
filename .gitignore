@@ -36,3 +36,7 @@ Thumbs.db
 
 # operator warm-switch bookkeeping (scripts/warm.py)
 .warm_state.json
+
+# The paid-window store (docs/X402_BILLING.md). Real money state -- it belongs
+# on the deployment box, never in the repo.
+billing.sqlite*

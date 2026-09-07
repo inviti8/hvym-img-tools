@@ -103,3 +103,11 @@ When the demo becomes a product, in rough order of effort:
 
 Steps 2 and 3 are what turn this from a spend-control measure into an actual identity
 boundary. Until then, be honest in any threat modelling that it is the former.
+
+**Steps 2 and 4 are now built** — see [X402_BILLING.md](X402_BILLING.md). Identity
+is a per-request ed25519 signature from the artist's own wallet, and requests are
+bound to method/path/tool/time/nonce, so replay is closed. Both are behind flags
+and default off, which means **the paragraph above still describes production
+today**: until `HVYM_REQUIRE_SIGNED_IDENTITY` is flipped, `X-API-Key` remains the
+only thing in the way, with all the limits described here. Step 3 (this proxy) is
+already deployed.

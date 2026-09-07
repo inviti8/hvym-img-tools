@@ -74,6 +74,7 @@ identical either way. See [`docs/DEPLOY.md`](docs/DEPLOY.md) and
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | images, serverless endpoint, proxy, cold start |
 | [`docs/WARMING.md`](docs/WARMING.md) | the demo warm switch vs. the product's client lease, and what warm costs |
 | [`docs/AUTH.md`](docs/AUTH.md) | API-key scheme, threat model, upgrade path |
+| [`docs/X402_BILLING.md`](docs/X402_BILLING.md) | **built, shipped off** — signed-identity auth + x402 pay-per-warm-window (the AUTH.md upgrade path, realised) |
 | [`docs/tools/reangle.md`](docs/tools/reangle.md) | the reference tool |
 | [`docs/tools/mesh.md`](docs/tools/mesh.md) | **design, greenlit** — sketch → untextured 3D reference to draw over |
 | [`docs/tools/hallucinate.md`](docs/tools/hallucinate.md) | superseded by `mesh.md`; kept as the record of why generative texturing was rejected |

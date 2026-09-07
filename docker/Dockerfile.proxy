@@ -16,8 +16,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     HVYM_PORT=8080
 
+# Mirrors pyproject's `proxy` extra -- keep the two in step. `pynacl` is the
+# one addition billing needs (ed25519 verification for signed wallet identity,
+# hvym_img_tools/core/identity.py). The Stellar strkey codec and the Horizon
+# calls are hand-rolled against httpx rather than pulling stellar-sdk's
+# dependency tree into an image whose entire point is being small enough to
+# share the cheapest always-on box available.
 RUN pip install --upgrade pip \
-    && pip install fastapi "uvicorn[standard]" python-multipart pydantic httpx
+    && pip install fastapi "uvicorn[standard]" python-multipart pydantic httpx pynacl
 
 WORKDIR /app
 # Only what the proxy imports: it pulls core.auth / core.config / core.server's
@@ -29,8 +35,17 @@ COPY hvym_img_tools /app/hvym_img_tools
 RUN python -c "\
 import sys; \
 from hvym_img_tools.proxy import create_app; \
+paths = {r.path for r in create_app().routes}; \
 assert 'torch' not in sys.modules, 'proxy must not import torch'; \
-print('ok: proxy imports without torch')"
+assert 'stellar_sdk' not in sys.modules, 'proxy must not import stellar_sdk'; \
+assert {'/warm', '/warm/pay', '/warm/price'} <= paths, paths; \
+print('ok: proxy imports without torch; x402 routes mounted')"
+
+# Where the paid-window store lives (docs/X402_BILLING.md §3). It MUST be on a
+# volume: the artist paid, and a container replaced on upgrade taking their
+# window with it is a refund request. scripts/install_proxy.sh mounts one here.
+ENV HVYM_BILLING_DB=/data/billing.sqlite
+VOLUME ["/data"]
 
 EXPOSE 8080
 CMD ["python", "-m", "hvym_img_tools.proxy"]
