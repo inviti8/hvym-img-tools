@@ -337,7 +337,11 @@ than adding a second. Two defaults will break this service:
   start*, which runs up to ~260 s (BENCHMARK.md 6b). Set 300 s or more.
 
 ```nginx
-location /tools/ {
+# A catch-all, not a location per route: the service keeps gaining paths
+# (/warm, then /warm/price and /warm/pay), and a per-route list fails by
+# silently 404-ing the new one on the day it matters. The path must also
+# reach the app UNCHANGED -- signed requests bind to the path the app sees.
+location / {
     proxy_pass http://127.0.0.1:8080;
     client_max_body_size 8m;
     proxy_read_timeout 300s;

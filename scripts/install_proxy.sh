@@ -272,7 +272,11 @@ ${DIM}This script does not edit your web-server config: another service runs on 
 box, and a bad edit plus a reload would take it down. Paste this instead.${OFF}
 
 --- nginx -------------------------------------------------------------------
-location /tools/ {
+# One catch-all, not a location per route. The service keeps gaining paths --
+# /warm, then /warm/price and /warm/pay for x402 billing -- and a per-route list
+# fails by 404-ing the new one silently, on the day it is needed. scripts/
+# setup_nginx.sh writes exactly this shape.
+location / {
     proxy_pass http://${BIND}:${PORT};
     proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -284,7 +288,10 @@ location /tools/ {
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
 }
-location = /healthz { proxy_pass http://${BIND}:${PORT}/healthz; }
+
+# The path must reach the app UNCHANGED: signed requests bind to the path the
+# app sees (docs/X402_BILLING.md §2), so a rewrite or a proxy_pass with a path
+# component would make every signature fail to verify.
 
 --- Caddy -------------------------------------------------------------------
 img.example.com {
