@@ -271,6 +271,8 @@ Mirrors `AI_BILLING_INTEGRATION.md` §7 (proxy-side rows):
 | routes | `hvym_img_tools/proxy.py` | gates on `/warm` + `/tools/*`; new `POST /warm/pay`, `GET /warm/price` |
 | 5 | `scripts/install_proxy.sh`, `docker/Dockerfile.proxy` | env written commented-off; `/data` volume for the store |
 | 7 | `tests/test_billing.py` | 66 tests, Horizon mocked, no chain and no network |
+| 7 (wire) | `scripts/x402_testnet_rehearsal.py` | 25/25 on real testnet Horizon; self-minted issuer, so the negative cases are testable |
+| 7 (wire) | `scripts/x402_testnet_real_usdc.py` | 11/11 paying **Centre's actual testnet USDC**; confirms the `credit_alphanum4` record shape |
 
 **Neither `stellar_sdk` nor a facilitator is a dependency.** The strkey codec is
 ~40 lines and Horizon is three read-only GETs over the `httpx` the proxy already
@@ -281,11 +283,20 @@ the dependency is free.
 ### Before the cutover
 
 1. **Phase 0 first.** The meter should not turn on against an unreconciled rate.
-2. **Re-run the testnet rehearsal** — `uv run python scripts/x402_testnet_rehearsal.py`.
-   It closes the one row of §7 a mock cannot: the shape of what Horizon really
-   returns for a `credit_alphanum4` payment. It also proves both security
-   bindings against genuine on-chain payments that must still be refused — a
-   lookalike `USDC` issuer, and a stranger paying someone else's quote.
+2. **Re-run the testnet rehearsals** — `scripts/x402_testnet_rehearsal.py` (routine;
+   self-contained) and `scripts/x402_testnet_real_usdc.py` (needs a funded identity).
+   Together they close the one row of §7 a mock cannot: the shape of what Horizon
+   really returns for a `credit_alphanum4` payment, confirmed against the asset
+   Circle actually issues. The first also proves both security bindings against
+   genuine on-chain payments that must still be refused — a lookalike `USDC`
+   issuer, and a stranger paying someone else's quote.
+
+   **The two issuers are different accounts.** Testnet USDC is
+   `GBBD47IF…FLA5` (`home_domain: centre.io`); mainnet is a different account
+   whose `home_domain` is `circle.com`. Confirm the mainnet value from Circle
+   before it goes in an env file — the issuer check is the only thing separating
+   real USDC from a token minted for free, and testnet has 200+ accounts issuing
+   something called `USDC`.
 3. **Establish the payee's USDC trustline *before* announcing a price.** On
    Stellar an account cannot receive an issued asset without one, so until it
    exists every payment fails with `op_no_trust` at the payer's end and the
