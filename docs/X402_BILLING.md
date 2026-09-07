@@ -258,7 +258,7 @@ Mirrors `AI_BILLING_INTEGRATION.md` §7 (proxy-side rows):
 |---|---|---|
 | **0 — validate rate** | Reconcile `USD_PER_SECOND` ($1.12/hr) against `/billing/endpoints` after a real day (WARMING.md §Open). | pricing confirmed before the meter turns on |
 | **2 — identity + window** ✅ | §2 signature verify (log-only first) + §3 `paid_through`/`consumed_tx` store, `Lease.label` = verified pubkey. | verified identity threaded through `/warm` + `/tools/*`; flags default off |
-| **3 — x402 endpoint** ✅ | §4: `402` challenge on unpaid acquire/renew/tool; `POST /warm/pay` Horizon verify + settle-on-grant; `GET /warm/price`. | mocked-Horizon coverage green; **a real testnet payment has not been run yet** |
+| **3 — x402 endpoint** ✅ | §4: `402` challenge on unpaid acquire/renew/tool; `POST /warm/pay` Horizon verify + settle-on-grant; `GET /warm/price`. | mocked coverage green **and** `scripts/x402_testnet_rehearsal.py` green against real testnet Horizon (25/25) |
 | **cutover** | Flip `HVYM_REQUIRE_SIGNED_IDENTITY` then `HVYM_REQUIRE_PAYMENT`. Keep `X-API-Key` as coarse gate. | production is pay-to-play |
 
 ### What is actually built, and where
@@ -281,9 +281,17 @@ the dependency is free.
 ### Before the cutover
 
 1. **Phase 0 first.** The meter should not turn on against an unreconciled rate.
-2. **Rehearse on testnet** — `HVYM_STELLAR_NETWORK=testnet` — end to end: 402 →
-   pay → `/warm/pay` → warm. That is the one row of §7 a mock cannot close.
-3. **Then flip, in order**, watching the logs between: signed identity, then
+2. **Re-run the testnet rehearsal** — `uv run python scripts/x402_testnet_rehearsal.py`.
+   It closes the one row of §7 a mock cannot: the shape of what Horizon really
+   returns for a `credit_alphanum4` payment. It also proves both security
+   bindings against genuine on-chain payments that must still be refused — a
+   lookalike `USDC` issuer, and a stranger paying someone else's quote.
+3. **Establish the payee's USDC trustline *before* announcing a price.** On
+   Stellar an account cannot receive an issued asset without one, so until it
+   exists every payment fails with `op_no_trust` at the payer's end and the
+   artist sees a failure that looks like our bug. This is not hypothetical — it
+   happened during the testnet run, to a send made before the trustline existed.
+4. **Then flip, in order**, watching the logs between: signed identity, then
    payment.
 
 (Phase 1 and 4 are the client's; already shipped / pending in Inkternity.)
