@@ -214,7 +214,7 @@ def create_app() -> FastAPI:
             await p.shutdown()
         billing.close()
 
-    app = FastAPI(title="hvym-img-tools proxy", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="hvym-img-tools proxy", version="0.4.0", lifespan=lifespan)
     app.state.warm_pool = pool
 
     @app.get("/healthz", tags=["meta"])

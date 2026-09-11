@@ -25,7 +25,7 @@
 # refund request, so the mount is not optional -- see docs/X402_BILLING.md.
 set -uo pipefail
 
-DEFAULT_TAG="0.1.2"
+DEFAULT_TAG="0.4.0"
 REGISTRY="ghcr.io/inviti8/hvym-img-proxy"
 NAME="hvym-img-proxy"
 CONF_DIR="/etc/hvym-img-tools"
