@@ -41,7 +41,8 @@ def call(method: str, path: str, key: str, body: dict | None = None) -> object:
         f"{API}{path}",
         method=method,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        # A User-Agent is required: RunPod's firewall answers urllib's default with 403.
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "hvym-img-tools-deploy/1.0"},
     )
     try:
         with urllib.request.urlopen(req) as resp:

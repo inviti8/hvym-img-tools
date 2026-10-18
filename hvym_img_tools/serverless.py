@@ -147,7 +147,7 @@ def handler(job: dict) -> dict:
         else:
             data[key] = value
 
-    missing = [f for f in file_fields if f not in data]
+    missing = [f for f in type(tool).required_file_fields() if f not in data]
     if missing:
         return {"error": f"missing required field(s): {missing}"}
 

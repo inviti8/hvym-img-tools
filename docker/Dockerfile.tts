@@ -1,0 +1,101 @@
+# hvym-img-tools Chatterbox worker -- serves `tts` (docs/tools/tts.md).
+#
+# Its own image because Chatterbox pins what the other images can't share:
+# torch 2.6.0 and transformers 5.2 (the TripoSR image needs transformers<5, the
+# TRELLIS image torch 2.4.1). One image per dependency island, one endpoint per
+# image, routed with RUNPOD_ENDPOINT_ID_TTS (docs/DEPLOY.md).
+#
+# **GPU pools: sm_90 and below** (ADA_24, AMPERE_24, AMPERE_16). torch 2.6.0+cu124
+# carries no Blackwell (sm_120) kernels; a Blackwell worker fails at the first
+# generate with "no kernel image is available".
+#
+# Licensing: MIT end to end (Chatterbox code and weights, Resemble AI). Every
+# output carries Resemble's imperceptible Perth watermark, applied by Chatterbox.
+FROM python:3.11-slim-bookworm
+
+ARG TORCH_VERSION=2.6.0
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu124
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_RESUME_RETRIES=20 \
+    PIP_RETRIES=10 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    HF_HOME=/opt/models/hf \
+    TORCH_HOME=/opt/models/torch \
+    HVYM_CACHE_DIR=/cache \
+    HVYM_WORKSPACE_DIR=/tmp/hvym \
+    HVYM_MODELS_DIR=/opt/models \
+    PYTHONPATH=/app
+
+# libsndfile: librosa reads WAV/FLAC/OGG references through soundfile.
+# ffmpeg: MP3 references go through audioread, which shells out to it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libsndfile1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip && pip install --ignore-installed blinker
+
+# torch first from the CUDA index, so chatterbox's `torch==2.6.0` is satisfied by
+# the cu124 build rather than resolving a different wheel from PyPI.
+RUN pip install "torch==${TORCH_VERSION}" "torchaudio==${TORCH_VERSION}" --index-url ${TORCH_INDEX}
+
+RUN pip install "chatterbox-tts==0.1.7" \
+    && pip install \
+        "numpy<2" "pillow>=10.1" "trimesh>=4.0" "fast-simplification>=0.1.7" "xatlas>=0.0.9" \
+        "pydantic>=2.6" fastapi "uvicorn[standard]" python-multipart httpx runpod huggingface_hub
+
+RUN python -c "\
+import torch, chatterbox, numpy; \
+assert torch.__version__.startswith('2.6.0'), torch.__version__; \
+assert '+cu' in torch.__version__, 'CPU torch got in: %s' % torch.__version__; \
+from chatterbox.tts import ChatterboxTTS; \
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS; \
+print('ok: torch', torch.__version__, '| numpy', numpy.__version__)"
+
+# --- weights, baked in for a fast cold start -------------------------------
+# One repo holds both models (English and multilingual). Fetched through the
+# retrying helper: CI runners share IPs and anonymous HuggingFace traffic gets 429s.
+COPY docker/fetch_weights.py /tmp/fetch_weights.py
+RUN --mount=type=secret,id=hf_token,required=false \
+    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+    python /tmp/fetch_weights.py ResembleAI/chatterbox
+
+# The watermarker may fetch its own weights on first use; do it here, online.
+RUN python -c "import perth; perth.PerthImplicitWatermarker(); print('ok: Perth watermarker')"
+
+# From here on, never touch the network: a cold worker must not download.
+ENV HF_HUB_OFFLINE=1
+
+# Prove both models load from the baked weights, offline. Separate steps so a
+# runner never holds both in memory at once.
+RUN python -c "\
+from chatterbox.tts import ChatterboxTTS; m = ChatterboxTTS.from_pretrained(device='cpu'); \
+assert m.sr == 24000, m.sr; print('ok: Chatterbox (English) loads offline')"
+RUN python -c "\
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS; m = ChatterboxMultilingualTTS.from_pretrained(device='cpu'); \
+print('ok: Chatterbox Multilingual loads offline')"
+
+# --- app -------------------------------------------------------------------
+WORKDIR /app
+COPY hvym_img_tools /app/hvym_img_tools
+COPY pyproject.toml README.md /app/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /cache /tmp/hvym
+
+RUN python -c "\
+from hvym_img_tools.core import registry; registry.discover(); \
+assert 'tts' in registry.names(), registry.names(); \
+from hvym_img_tools.tools.tts.tool import TtsTool, CHATTERBOX; \
+assert TtsTool().models_needed() == [CHATTERBOX]; \
+import hvym_img_tools.serverless; \
+print('ok: tools ->', registry.names())"
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["serverless"]
+
+LABEL org.opencontainers.image.source="https://github.com/inviti8/hvym-img-tools" \
+      org.opencontainers.image.description="hvym-img-tools Chatterbox worker - tts (dialog lines, voice cloning)" \
+      org.opencontainers.image.licenses="MIT"

@@ -419,3 +419,11 @@ Per AGENTS.md §11, the gate is passed — roadmap steps 1–3 are live:
 The async job form contemplated in AGENTS.md §8 (`202 + job id`) is **not needed for
 reangle**: 1.8 s warm fits a synchronous request comfortably. Cold start (~15 s) is the only
 case that might warrant it.
+
+## 9. `tts` (Chatterbox), measured on the live endpoint (2026-10-18)
+
+See `docs/tools/tts.md` §5 for the table. In short:
+- warm, about real time per line, at $0.0006–0.002 a line;
+- a cloned voice costs about 3 s once, then it's remembered;
+- the first-ever image pull took 9.6 min, and a parked worker restarts in 0.87 s;
+- all eleven benchmark jobs cost $0.0385 in total.

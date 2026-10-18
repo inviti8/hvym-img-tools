@@ -35,6 +35,7 @@ and a revocation lever, not an identity boundary.
 |---|---|---|
 | `docker/Dockerfile.mesh` | GPU worker — **`mesh` + `reangle`** | torch 2.4.1/cu124, TRELLIS, kaolin/spconv, isnet, **weights baked in** |
 | `docker/Dockerfile` | GPU worker — `reangle` on TripoSR, the **rollback target** | torch 2.8/cu128, TripoSR, torchmcubes, isnet |
+| `docker/Dockerfile.tts` | GPU worker — **`tts`** | torch 2.6.0/cu124, Chatterbox 0.1.7 (English + multilingual), **weights baked in**, offline at run time |
 | `docker/Dockerfile.proxy` | proxy | fastapi + httpx only — no torch, no CUDA |
 
 Since reangle 0.3.0 the TRELLIS image serves **both** tools and the TripoSR image
@@ -115,6 +116,7 @@ The build says nothing, so getting this wrong looks like a working deploy.
 | Image | Built for | GPU pools it may be given | Verified |
 |---|---|---|---|
 | `hvym-img-mesh` (**mesh + reangle**) | torch 2.4.1/cu124 + kaolin/spconv wheels, max **sm_90** | `ADA_24`, `AMPERE_24`, `AMPERE_80` | 4090 yes; A100 placement only |
+| `hvym-img-tts` (**tts**) | torch 2.6.0/cu124, max **sm_90** | `ADA_24`, `AMPERE_24`, `AMPERE_16` | not yet deployed (docs/tools/tts.md §5) |
 | `hvym-img-tools` (reangle on TripoSR) | `8.0;8.6;8.9;9.0;12.0+PTX` (torch 2.8/cu128) | `ADA_24`, `AMPERE_24`, `ADA_32_PRO`, `AMPERE_80`, `BLACKWELL_96`, `HOPPER_141` | **yes** — a job pinned to `ADA_32_PRO` ran on an RTX 5090 (sm_120), 45.5 s, HTTP 200 |
 
 **Never give the mesh endpoint a Blackwell pool** (`ADA_32_PRO`, `BLACKWELL_96`,

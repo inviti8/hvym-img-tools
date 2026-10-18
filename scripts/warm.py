@@ -56,7 +56,8 @@ def call(url: str, key: str, method: str = "GET", body: dict | None = None) -> o
     req = urllib.request.Request(
         url, method=method,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        # A User-Agent is required: RunPod's firewall answers urllib's default with 403.
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "hvym-img-tools-warm/1.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
