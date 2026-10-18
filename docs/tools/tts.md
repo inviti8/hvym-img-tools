@@ -1,7 +1,8 @@
 # `tts` — a line of dialog, spoken
 
-Status: **built, not yet deployed or benchmarked** (§5). Tool #3, and the first
-that isn't an image tool.
+Status: **live** on RunPod Serverless as endpoint `hvym-img-tts`
+(`37q2tisf0fssjn`, EU-RO-1, 4090/L4, scale to zero, image `hvym-img-tts:0.1.0`).
+Benchmarked 2026-10-18 (§5). Tool #3, and the first that isn't an image tool.
 
 ## 1. What and why
 
@@ -65,22 +66,52 @@ demands required files.
 - **GPU pools:** sm_90 and below (`ADA_24`, `AMPERE_24`, `AMPERE_16`). torch
   2.6.0+cu124 has no Blackwell kernels.
 
-## 5. Not done yet
+## 5. Measured on the live endpoint (2026-10-18)
 
-- **Benchmark (AGENTS.md §0):**
-  - Cold start, and warm seconds per second of audio, on a 4090 or L4.
-  - Cost per line.
-  - With and without a reference.
+`scripts/benchmark/tts_endpoint.py`, called directly on RunPod (not through the
+proxy), so RunPod's own `delayTime` (queue and cold start) and `executionTime`
+(work) are separate.
 
-  Record it in `docs/BENCHMARK.md` before relying on the numbers.
-- **Deploy:** build (`gh workflow run images.yml --ref <branch> -f tag=0.1.0 -f
-  only=tts`), then `scripts/deploy_runpod.py --image ghcr.io/inviti8/hvym-img-tts:0.1.0
-  --name hvym-img-tts`, then route the proxy with `set_tool_endpoint.sh tts
-  <endpoint-id>`.
-- **The Keyternity client is built:** "Chatterbox (hosted)" in the Dialog window,
-  with endpoint and key in Settings → Voices and Inkternity's timeouts, retries and
-  status messages.
-  - Verified against this server running locally with a faked model: routing,
-    multipart, the optional reference, the multilingual route, auth and caching
-    (Keyternity's `dialog::hosted_chatterbox_against_the_service`).
-  - Not verified: a real GPU.
+| job | delay | work | audio | work ÷ audio | cost* |
+|---|---|---|---|---|---|
+| first ever (image pull + load) | **578 s** | 1.9 s | 1.6 s | 1.15 | $0.0006 |
+| warm, short English line | 0.13 s | 1.9 s | 1.8 s | 1.01–1.06 | $0.0006 |
+| warm, long English line | 0.15 s | 5.2 s | 7.3 s | **0.71** | $0.0016 |
+| emotional (exaggeration 1.2) | 0.13 s | 1.8 s | 1.8 s | 1.02 | $0.0006 |
+| cloned voice, first line | 0.15 s | 5.1 s | 2.7 s | 1.91 | $0.0016 |
+| same voice again | 0.14 s | 6.7 s | 8.5 s | 0.78 | $0.0021 |
+| French, first (multilingual model loads) | 0.14 s | 13.7 s | 2.1 s | 6.56 | $0.0042 |
+| French, warm | 0.13 s | 5.6 s | 6.9 s | 0.81 | $0.0017 |
+| French, cloned | 0.15 s | 3.3 s | 2.9 s | 1.13 | $0.0010 |
+| restart from idle, image cached | **0.87 s** | 1.9 s | | | |
+
+\* The cost column is work × $0.00031/s. **The real spend for all eleven jobs,
+including the first pull and the idle tails, was $0.0385** (the account balance
+before and after).
+
+- **Warm:** Chatterbox speaks at roughly real time on short lines and faster on
+  long ones, at about **$0.0006–0.002 per line**.
+- **Analysing a voice** costs about 3 s once. After that the voice is remembered
+  (`VoiceMemory`), and the same voice's next line ran at 0.78× real time.
+- **The multilingual model** costs about 8 s to load on its first non-English line,
+  then it's as fast as English.
+- **Cold start:**
+  - The very first pull of the image took 9.6 minutes.
+  - After that, RunPod parks an idle worker with the image cached. It isn't billed
+    (the spend rate stayed at storage only), and it restarted in 0.87 s.
+  - A worker RunPod has fully evicted will be in between (container start plus
+    model load). It can't be forced on demand, so it wasn't measured.
+- **Quality:**
+  - Whisper (tiny.en) transcribed every English output exactly, cloned voices
+    included.
+  - Cloning carries the voice over. The reference (Windows' "David") has a median
+    pitch of 101 Hz. Chatterbox's own voice is 143–162 Hz, but the cloned lines
+    came out at 90–104 Hz, and French cloned at 111 Hz.
+  - Listening is still the real test. The reference here was a synthetic voice, so
+    repeat it with a real recording.
+
+## 6. Not done yet
+
+- **Route the proxy** (on the proxy's server): `sudo bash set_tool_endpoint.sh tts
+  37q2tisf0fssjn`. The Keyternity client is built, and Inkternity can use the same
+  call.
