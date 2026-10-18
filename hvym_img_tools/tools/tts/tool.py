@@ -13,8 +13,11 @@ upload behind a consent checkbox, and this tool never ships voices of real peopl
 """
 from __future__ import annotations
 
+import hashlib
 import random
 import tempfile
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +103,57 @@ class TtsInput(BaseModel):
         return v
 
 
+class VoiceMemory:
+    """Voices Chatterbox has already analysed, by the reference clip's hash.
+
+    Analysing a reference (`prepare_conditionals`: resample, tokenise, speaker
+    embedding) is repeated work when a character speaks many lines in one voice.
+    Chatterbox keeps the analysed voice on the model (`model.conds`) and uses it
+    when `generate` gets no prompt path, re-applying the emotion setting on every
+    call, so a remembered voice still honours each line's exaggeration.
+
+    A model holds one voice at a time, so swapping it in and generating happen
+    under one lock per model.
+    """
+
+    def __init__(self, size: int = 32):
+        self.size = size
+        self._voices: OrderedDict[tuple[int, str], Any] = OrderedDict()
+        self._defaults: dict[int, Any] = {}
+        self._locks: dict[int, threading.Lock] = {}
+        self._guard = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def lock(self, model: Any) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(id(model), threading.Lock())
+
+    def use(self, model: Any, reference: bytes | None, path: Path | None, exaggeration: float) -> None:
+        """Put the right voice on `model`: its own (no reference), or a reference's.
+        Call with `lock(model)` held."""
+        self._defaults.setdefault(id(model), getattr(model, "conds", None))
+        if reference is None:
+            model.conds = self._defaults[id(model)]
+            return
+        key = (id(model), hashlib.sha256(reference).hexdigest())
+        conds = self._voices.get(key)
+        if conds is None:
+            self.misses += 1
+            model.prepare_conditionals(str(path), exaggeration=exaggeration)
+            conds = model.conds
+            self._voices[key] = conds
+            while len(self._voices) > self.size:
+                self._voices.popitem(last=False)
+        else:
+            self.hits += 1
+            self._voices.move_to_end(key)
+        model.conds = conds
+
+
+VOICES = VoiceMemory()
+
+
 def synthesize(model: Any, req: TtsInput, reference: Path | None) -> tuple[Any, int]:
     """Run Chatterbox: (waveform, sample rate). Seeded for reproducible takes."""
     import numpy as np
@@ -116,14 +170,17 @@ def synthesize(model: Any, req: TtsInput, reference: Path | None) -> tuple[Any, 
         pass
 
     kwargs: dict[str, Any] = {
-        "audio_prompt_path": str(reference) if reference else None,
+        # the voice is put on the model by VOICES; no prompt path, so it's reused
+        "audio_prompt_path": None,
         "exaggeration": req.exaggeration,
         "cfg_weight": req.cfg_weight,
         "temperature": req.temperature,
     }
     if req.language != "en":
         kwargs["language_id"] = req.language
-    wav = model.generate(req.text, **kwargs)
+    with VOICES.lock(model):
+        VOICES.use(model, req.reference, reference, req.exaggeration)
+        wav = model.generate(req.text, **kwargs)
     # a tensor [1, N] from Chatterbox; anything array-like from a stand-in
     if hasattr(wav, "detach"):
         wav = wav.detach().cpu().numpy()

@@ -25,20 +25,30 @@ from hvym_img_tools.tools.tts.tool import CHATTERBOX, CHATTERBOX_MTL, TtsInput, 
 
 
 class FakeChatterbox:
-    """Records what it was asked; 'speaks' a short tone at Chatterbox's 24 kHz."""
+    """Behaves like Chatterbox where it matters: holds one voice (`conds`, its own
+    to begin with), analyses a reference with `prepare_conditionals`, and speaks
+    in whatever voice it holds. Records it all; 'speaks' a tone at 24 kHz."""
 
     sr = 24_000
 
     def __init__(self, name: str):
         self.name = name
         self.calls: list[dict] = []
+        self.analysed: list[bytes] = []
+        self.conds = ("own voice", None)
+
+    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+        data = open(wav_fpath, "rb").read()
+        self.analysed.append(data)
+        self.conds = ("cloned", data)
 
     def generate(self, text, **kw):
-        prompt = kw.get("audio_prompt_path")
+        assert kw.get("audio_prompt_path") is None, "voices come from VoiceMemory, not a prompt path"
         self.calls.append({
             "text": text,
             **kw,
-            "prompt_bytes": open(prompt, "rb").read() if prompt else None,
+            "voice": self.conds[0],
+            "prompt_bytes": self.conds[1],
             "draw": float(np.random.random()),  # shows the seed took effect
         })
         t = np.arange(self.sr // 4) / self.sr
@@ -107,7 +117,7 @@ def test_english_uses_the_english_model_and_returns_wav(ctx):
     call = ctx.extras["en"].calls[0]
     assert call["text"] == "Hello there." and call["exaggeration"] == 0.7
     assert "language_id" not in call, "the English model takes no language"
-    assert call["audio_prompt_path"] is None
+    assert call["voice"] == "own voice"
     assert not ctx.extras["mtl"].calls
 
 
@@ -118,13 +128,28 @@ def test_other_languages_use_the_multilingual_model(ctx):
     assert not ctx.extras["en"].calls
 
 
-def test_the_reference_reaches_the_model_as_a_named_file_then_goes(ctx):
+def test_the_reference_is_analysed_then_its_file_goes(ctx):
     ref = _wav()
     TtsTool().run(TtsInput(text="Hi.", reference=ref), ctx)
     call = ctx.extras["en"].calls[0]
-    assert call["audio_prompt_path"].endswith(".wav")
-    assert call["prompt_bytes"] == ref
+    assert (call["voice"], call["prompt_bytes"]) == ("cloned", ref)
     assert not list(ctx.workspace.glob("*")), "the reference is deleted after use"
+
+
+def test_a_voice_is_analysed_once_for_many_lines(ctx):
+    """A character's lines share one analysis; another voice gets its own, and the
+    model's own voice comes back when no reference is sent."""
+    from hvym_img_tools.tools.tts.tool import VOICES
+
+    alice, bob = _wav(0.1), _wav(0.2)
+    tool, en = TtsTool(), ctx.extras["en"]
+    for text, ref in [("One.", alice), ("Two.", alice), ("Three.", bob), ("Four.", alice), ("Five.", None)]:
+        tool.run(TtsInput(text=text, reference=ref, exaggeration=0.9), ctx)
+    assert en.analysed.count(alice) == 1 and en.analysed.count(bob) == 1, "each voice analysed once"
+    voices = [(c["voice"], c["prompt_bytes"]) for c in en.calls]
+    assert voices == [("cloned", alice), ("cloned", alice), ("cloned", bob), ("cloned", alice), ("own voice", None)]
+    assert all(c["exaggeration"] == 0.9 for c in en.calls), "emotion still passed on every line"
+    assert VOICES.hits >= 2
 
 
 def test_seed_makes_takes_reproducible(ctx):
