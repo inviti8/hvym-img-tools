@@ -25,7 +25,8 @@ class FileBytes(bytes):
     """Marks an `InputModel` field as a binary upload.
 
     The registry turns these into multipart file parameters and hands `run()`
-    the raw bytes, so a tool never deals with HTTP.
+    the raw bytes, so a tool never deals with HTTP. Annotate `FileBytes | None`
+    (default `None`) for an optional upload, such as `tts`'s voice reference.
     """
 
     @classmethod
@@ -69,6 +70,16 @@ class Context:
     workspace: Path
     config: "Config"
     extras: dict[str, Any] = field(default_factory=dict)
+
+
+def _is_file(annotation: Any) -> bool:
+    """`FileBytes`, or an optional one (`FileBytes | None`, `Optional[FileBytes]`)."""
+    import typing
+
+    if isinstance(annotation, type) and issubclass(annotation, FileBytes):
+        return True
+    args = [a for a in typing.get_args(annotation) if a is not type(None)]
+    return len(args) == 1 and isinstance(args[0], type) and issubclass(args[0], FileBytes)
 
 
 class Tool(ABC):
@@ -142,10 +153,13 @@ class Tool(ABC):
 
     @classmethod
     def file_fields(cls) -> tuple[str, ...]:
-        return tuple(
-            n for n, f in cls.InputModel.model_fields.items()
-            if isinstance(f.annotation, type) and issubclass(f.annotation, FileBytes)
-        )
+        """Every binary field, required or optional (`FileBytes | None`)."""
+        return tuple(n for n, f in cls.InputModel.model_fields.items() if _is_file(f.annotation))
+
+    @classmethod
+    def required_file_fields(cls) -> tuple[str, ...]:
+        fields = cls.InputModel.model_fields
+        return tuple(n for n in cls.file_fields() if fields[n].is_required())
 
     @classmethod
     def describe(cls) -> dict[str, Any]:
@@ -155,6 +169,7 @@ class Tool(ABC):
             "version": cls.version,
             "returns_media": cls.returns_media(),
             "file_fields": list(cls.file_fields()),
+            "required_file_fields": list(cls.required_file_fields()),
         }
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

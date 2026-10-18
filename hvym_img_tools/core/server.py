@@ -88,7 +88,10 @@ def _build_endpoint(tool: Tool, ctx: Context):
         try:
             req = model(**data)
         except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+            # Without the input (an upload's raw bytes) or the context (exception
+            # objects): neither is JSON, and the message already says what's wrong.
+            errors = exc.errors(include_input=False, include_context=False, include_url=False)
+            raise HTTPException(status_code=422, detail=errors) from exc
 
         cache_key = hash_parts(tool.cache_key_parts(req))
         hit = ctx.cache.get(cache_key)
@@ -120,9 +123,11 @@ def _build_endpoint(tool: Tool, ctx: Context):
         params = []
         for name, field in model.model_fields.items():
             if name in file_fields:
+                required = field.is_required()
                 params.append(inspect.Parameter(
                     name, inspect.Parameter.KEYWORD_ONLY,
-                    annotation=UploadFile, default=File(...),
+                    annotation=UploadFile if required else UploadFile | None,
+                    default=File(...) if required else File(None),
                 ))
             else:
                 default = Form(... if field.is_required() else field.default)
@@ -136,6 +141,8 @@ def _build_endpoint(tool: Tool, ctx: Context):
             limit = ctx.config.max_upload_mb * 1024 * 1024
             for key, value in kwargs.items():
                 if key in file_fields:
+                    if value is None:  # an optional upload left out: the model default
+                        continue
                     blob = await value.read()
                     if len(blob) > limit:
                         raise HTTPException(
