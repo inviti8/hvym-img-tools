@@ -761,3 +761,64 @@ def test_enforcing_payment_with_no_payee_refuses_to_start(monkeypatch):
     monkeypatch.delenv("HVYM_PAYEE_ADDRESS", raising=False)
     with pytest.raises(RuntimeError, match="HVYM_PAYEE_ADDRESS"):
         proxy_mod.create_app()
+
+
+# ------------------------------------------- the clock starts on a served call
+def _upstream(monkeypatch, output):
+    """RunPod answering /runsync with `output`, as test_proxy.FakeUpstream does."""
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return httpx.Response(200, json={"status": "COMPLETED", "output": output},
+                                  request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(proxy_mod.httpx, "AsyncClient", _Client)
+
+
+def test_a_served_tool_call_starts_the_window(wired, wallet, monkeypatch):
+    """An on-demand client never holds a lease, so `on_warm` never fires for it.
+    Without this, an unstarted credit entitles forever: one payment, unlimited
+    calls."""
+    client, bill, _ = wired()
+    bill.store.credit_for_tx(TX, wallet.pubkey, 900.0, now=1000.0)
+    _upstream(monkeypatch, {"data": base64.b64encode(b"RIFF").decode(), "media_type": "audio/wav"})
+    resp = client.post(
+        "/tools/tts", data={"text": "hi"},
+        headers=wallet.sign("POST", "/tools/tts", "tts", nonce="6" * 32),
+    )
+    assert resp.status_code == 200, resp.text
+    assert bill.store.row(wallet.pubkey) == (1900.0, 0.0)
+
+
+def test_a_failed_tool_call_leaves_the_credit_unstarted(wired, wallet, monkeypatch):
+    """No result, no charge: the same rule as a cold start that never warmed."""
+    client, bill, _ = wired()
+    bill.store.credit_for_tx(TX, wallet.pubkey, 900.0, now=1000.0)
+    _upstream(monkeypatch, {"error": "the tool blew up"})
+    resp = client.post(
+        "/tools/tts", data={"text": "hi"},
+        headers=wallet.sign("POST", "/tools/tts", "tts", nonce="7" * 32),
+    )
+    assert resp.status_code == 500
+    assert bill.store.row(wallet.pubkey) == (0.0, 900.0)
+
+
+def test_once_the_served_window_runs_out_the_next_call_pays_again(wired, wallet, monkeypatch):
+    now = {"t": 1000.0}
+    client, bill, _ = wired(clock=lambda: now["t"])
+    bill.store.credit_for_tx(TX, wallet.pubkey, 900.0, now=1000.0)
+    _upstream(monkeypatch, {"data": base64.b64encode(b"RIFF").decode()})
+    sign = lambda n: wallet.sign("POST", "/tools/tts", "tts", nonce=n * 32)  # noqa: E731
+    assert client.post("/tools/tts", data={"text": "hi"}, headers=sign("8")).status_code == 200
+    now["t"] = 1000.0 + 901
+    resp = client.post("/tools/tts", data={"text": "hi"}, headers=sign("9"))
+    assert resp.status_code == 402
