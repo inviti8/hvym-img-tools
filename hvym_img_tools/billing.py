@@ -584,6 +584,24 @@ class Billing:
             "pending_credit_s": credit_s,
         }
 
+    def on_served(self, pubkey: str | None) -> None:
+        """A tool call for this identity was served -- the other grant.
+
+        A client that never holds a lease (an on-demand tool, like `tts`) never
+        reaches `on_warm`, and an unstarted credit entitles forever: without this,
+        one payment would buy unlimited calls. A delivered result is as much a
+        grant as a warm worker, so it starts the clock too.
+        """
+        if not pubkey or not self._has_state:
+            return
+        now = self._clock()
+        settled = self.store.settle(pubkey, now)
+        if settled is not None:
+            log.info(
+                "paid window started on a served call pubkey=%s paid_through=+%.0fs",
+                pubkey[:8], settled - now,
+            )
+
     def on_warm(self, labels) -> None:
         """`WarmPool` telling us a worker actually reached `warm`.
 

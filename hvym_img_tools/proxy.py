@@ -455,6 +455,8 @@ def create_app() -> FastAPI:
         output = body.get("output") or {}
         if "error" in output:
             raise HTTPException(status_code=500, detail=str(output["error"])[:500])
+        if identity is not None:
+            billing.on_served(identity.pubkey)
 
         elapsed = time.perf_counter() - started
         headers = {

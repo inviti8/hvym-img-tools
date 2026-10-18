@@ -158,6 +158,12 @@ First time WarmPool reports warm for a held lease of pubkey:
 `WarmPool` already knows warmth (`_state()` / `workers_ready`); wire the transition there.
 Keep it simple: one credit outstanding at a time is fine for v1.
 
+**A served tool call is a grant too** (`Billing.on_served`). A client that never holds a
+lease, such as Keyternity calling `tts` on demand, never reaches `warm`, and an unstarted
+credit entitles forever: one payment would otherwise buy unlimited calls. So a tool call
+that comes back without an error also starts the clock. A failed call does not, by the
+same "no warm, no charge" rule.
+
 ### Attribution ties into the existing lease record
 `warm.py`'s `Lease` already carries `label`, `acquired_wall`, `renewals`, `held_s()` and logs
 a billable line on release/expiry. Two changes: set `label` to the verified pubkey, and emit
