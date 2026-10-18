@@ -77,6 +77,10 @@ demands required files.
   only=tts`), then `scripts/deploy_runpod.py --image ghcr.io/inviti8/hvym-img-tts:0.1.0
   --name hvym-img-tts`, then route the proxy with `set_tool_endpoint.sh tts
   <endpoint-id>`.
-- **The Keyternity client:** a Hosted Chatterbox voice in the Dialog window. Its
-  endpoint and key go in Settings → Voices, with Inkternity's timeouts and error
-  handling (docs/CLIENT.md).
+- **The Keyternity client is built:** "Chatterbox (hosted)" in the Dialog window,
+  with endpoint and key in Settings → Voices and Inkternity's timeouts, retries and
+  status messages.
+  - Verified against this server running locally with a faked model: routing,
+    multipart, the optional reference, the multilingual route, auth and caching
+    (Keyternity's `dialog::hosted_chatterbox_against_the_service`).
+  - Not verified: a real GPU.
